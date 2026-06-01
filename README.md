@@ -67,3 +67,8 @@ See `install.md`.
 ## Known Issues
 
 See `known-issues.md`.
+
+## License
+
+GPL-2.0; see `LICENSE`. The kernel patch series carries its own
+upstream Linux SPDX tags inside each patch.
