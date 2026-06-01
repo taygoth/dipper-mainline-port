@@ -1,0 +1,96 @@
+From ec5654b27ef716eb7cb12bf1684af2393212b514 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:19:42 +0500
+Subject: [PATCH 3/9] Input: touchscreen/stm/ftm5: allow board to narrow active
+ scan mask
+
+The driver currently enables all active scan features with mask 0xFF.
+Some firmware variants do not tolerate that full mask: on Mi 8 / dipper
+with Xiaomi's st_fts_e1.ftb firmware, the controller locks up on 0xFF
+but works with ACTIVE_MULTI_TOUCH only.
+
+Add an optional st,active-scan-mask property so boards can narrow the
+active scan mask from DT. The default remains 0xFF, so existing boards
+keep the current behavior.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ drivers/input/touchscreen/stm/fts.c           | 21 +++++++++++--------
+ drivers/input/touchscreen/stm/fts.h           |  3 +++
+ .../input/touchscreen/stm/fts_lib/ftsTool.c   |  2 +-
+ 3 files changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/input/touchscreen/stm/fts.c b/drivers/input/touchscreen/stm/fts.c
+index 05d4510a6..714946a47 100644
+--- a/drivers/input/touchscreen/stm/fts.c
++++ b/drivers/input/touchscreen/stm/fts.c
+@@ -129,6 +129,9 @@ static u8 key_mask;	/* /< store the last update of the key mask
+ 				  * published by the IC */
+ #endif
+ 
++/* Board override for firmware that cannot enable every active scan feature. */
++u8 fts_active_scan_mask = 0xFF;
++
+ extern spinlock_t fts_int;
+ 
+ static int fts_init_sensing(struct fts_ts_info *info);
+@@ -3792,15 +3795,9 @@ static int fts_mode_handler(struct fts_ts_info *info, int force)
+ 				pr_debug("%s: GRIP_MODE Disabled!\n", __func__);
+ 		}
+ #endif
+-		/* If some selective scan want to be enabled can be done
+-		  * an or of the following options
+-		  */
+-		/* settings[0] = ACTIVE_MULTI_TOUCH | ACTIVE_KEY | */
+-		/*		ACTIVE_HOVER | ACTIVE_PROXIMITY | */
+-		/*		ACTIVE_FORCE; */
+-		settings[0] = 0xFF;	/* enable all the possible scans mode
+-					  * supported by the config */
+-		pr_debug("%s: Sense ON!\n", __func__);
++		settings[0] = fts_active_scan_mask;
++		pr_debug("%s: Sense ON, scan mask 0x%02x\n",
++			 __func__, settings[0]);
+ 		res |= setScanMode(SCAN_MODE_ACTIVE, settings[0]);
+ 		info->mode |= (SCAN_MODE_ACTIVE << 24);
+ 		MODE_ACTIVE(info->mode, settings[0]);
+@@ -4288,6 +4285,12 @@ static int parse_dt(struct device *dev, struct fts_hw_platform_data *bdata)
+ 	bdata->x_axis_max = coords[0];
+ 	bdata->y_axis_max = coords[1];
+ 
++	/* Optional board override; default stays 0xFF. */
++	if (of_property_read_u8(np, "st,active-scan-mask",
++				&fts_active_scan_mask) == 0)
++		pr_info("active scan mask overridden by DT: 0x%02x\n",
++			fts_active_scan_mask);
++
+ 	return OK;
+ }
+ 
+diff --git a/drivers/input/touchscreen/stm/fts.h b/drivers/input/touchscreen/stm/fts.h
+index ca434c1cc..48d66dfce 100644
+--- a/drivers/input/touchscreen/stm/fts.h
++++ b/drivers/input/touchscreen/stm/fts.h
+@@ -426,4 +426,7 @@ extern int fts_proc_remove(void);
+ /* Bus reference tracking */
+ int fts_set_bus_ref(struct fts_ts_info *info, u16 ref, bool enable);
+ 
++/* Active scan-mode mask; defaults to 0xFF unless DT overrides it. */
++extern u8 fts_active_scan_mask;
++
+ #endif
+diff --git a/drivers/input/touchscreen/stm/fts_lib/ftsTool.c b/drivers/input/touchscreen/stm/fts_lib/ftsTool.c
+index e359b1a0d..a9098a897 100644
+--- a/drivers/input/touchscreen/stm/fts_lib/ftsTool.c
++++ b/drivers/input/touchscreen/stm/fts_lib/ftsTool.c
+@@ -289,7 +289,7 @@ int senseOn(void)
+ {
+ 	int ret;
+ 
+-	ret = setScanMode(SCAN_MODE_ACTIVE, 0xFF);	/* enable all */
++	ret = setScanMode(SCAN_MODE_ACTIVE, fts_active_scan_mask);
+ 	if (ret < OK) {
+ 		pr_err("senseOn: ERROR %08X\n", ret);
+ 		return ret;
+-- 
+2.44.0
+

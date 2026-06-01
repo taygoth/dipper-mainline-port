@@ -1,0 +1,23 @@
+# Assumes the default Mobian user (mobian, UID 1000). If the image uses
+# a different user / UID, adjust User= and the XDG_RUNTIME_DIR path.
+[Unit]
+Description=Xiaomi Mi 8 call audio glue (dbus-monitor pw-loopback + aplay keepalive)
+Documentation=https://gitlab.com/postmarketOS/pmaports/-/tree/master/device/community/soc-qcom-sdm845
+After=ModemManager.service user-runtime-dir@1000.service
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+User=mobian
+# PipeWire and the WirePlumber session live in the user XDG runtime dir.
+# We do not have a strong dependency on user-level pipewire.service because
+# it lives in the user instance, not the system one; pgrep/pactl/pw-loopback
+# will simply no-op if PipeWire is not running yet, and the dbus signal
+# loop will keep going.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/sbin/dipper-call-audio-workaround
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

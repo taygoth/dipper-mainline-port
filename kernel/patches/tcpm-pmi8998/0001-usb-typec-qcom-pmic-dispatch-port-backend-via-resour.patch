@@ -1,0 +1,194 @@
+From 3dd7c15903de6044c9eb2fc0dd978e022a652699 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:23:06 +0500
+Subject: [PATCH 1/4] usb: typec: qcom-pmic: dispatch port backend via resource
+ table
+
+PMI8998's Type-C controller has a different register layout from
+PM8150B / PMI632 (different STATUS_4 bit positions, a hardware-managed
+debounce, and a single rollup IRQ instead of separate CC and VBUS
+IRQs). The existing pm8150b code therefore cannot be shared as-is.
+
+In preparation for adding PMI8998 as a sibling, dispatch port-handler
+probe via a per-resource function pointer instead of calling
+qcom_pmic_typec_port_probe() directly. Each resource table entry
+points at its own probe routine and stashes its port-private struct in
+a typed void *port_priv pointer on the shared pmic_typec struct.
+
+The existing pm8150b path now goes through .probe =
+qcom_pmic_typec_port_probe, and the field rename
+pmic_typec_port -> port_priv is otherwise mechanical.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c | 11 +++++++++--
+ drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h |  2 +-
+ .../typec/tcpm/qcom/qcom_pmic_typec_port.c    | 19 ++++++++++---------
+ .../typec/tcpm/qcom/qcom_pmic_typec_port.h    |  6 ++++++
+ 4 files changed, 26 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
+index b80eb2d78..b833b9977 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c
+@@ -66,8 +66,8 @@ static int qcom_pmic_typec_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = qcom_pmic_typec_port_probe(pdev, tcpm,
+-					 res->port_res, regmap, base);
++	ret = res->port_res->probe(pdev, tcpm,
++				   res->port_res, regmap, base);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -150,9 +150,16 @@ static const struct pmic_typec_resources pmi632_typec_res = {
+ 	.port_res = &pm8150b_port_res,
+ };
+ 
++static const struct pmic_typec_resources pmi8998_typec_res = {
++	/* PDPHY block is register-identical to PM8150B. */
++	.pdphy_res = &pm8150b_pdphy_res,
++	.port_res  = &pmi8998_port_res,
++};
++
+ static const struct of_device_id qcom_pmic_typec_table[] = {
+ 	{ .compatible = "qcom,pm8150b-typec", .data = &pm8150b_typec_res },
+ 	{ .compatible = "qcom,pmi632-typec", .data = &pmi632_typec_res },
++	{ .compatible = "qcom,pmi8998-typec", .data = &pmi8998_typec_res },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, qcom_pmic_typec_table);
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h
+index 3c75820c9..5948b3ea2 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h
+@@ -11,7 +11,7 @@ struct pmic_typec {
+ 	struct tcpm_port	*tcpm_port;
+ 	struct tcpc_dev		tcpc;
+ 	struct pmic_typec_pdphy	*pmic_typec_pdphy;
+-	struct pmic_typec_port	*pmic_typec_port;
++	void			*port_priv;
+ 
+ 	int (*pdphy_start)(struct pmic_typec *tcpm,
+ 			   struct tcpm_port *tcpm_port);
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
+index 4fc83dcfa..ff1654209 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.c
+@@ -324,7 +324,7 @@ static int qcom_pmic_typec_port_vbus_toggle(struct pmic_typec_port *pmic_typec_p
+ static int qcom_pmic_typec_port_get_vbus(struct tcpc_dev *tcpc)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	int ret;
+ 
+ 	mutex_lock(&pmic_typec_port->vbus_lock);
+@@ -337,7 +337,7 @@ static int qcom_pmic_typec_port_get_vbus(struct tcpc_dev *tcpc)
+ static int qcom_pmic_typec_port_set_vbus(struct tcpc_dev *tcpc, bool on, bool sink)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	int ret = 0;
+ 
+ 	mutex_lock(&pmic_typec_port->vbus_lock);
+@@ -363,7 +363,7 @@ static int qcom_pmic_typec_port_get_cc(struct tcpc_dev *tcpc,
+ 				       enum typec_cc_status *cc2)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	struct device *dev = pmic_typec_port->dev;
+ 	unsigned int misc, val;
+ 	bool attached;
+@@ -459,7 +459,7 @@ static int qcom_pmic_typec_port_set_cc(struct tcpc_dev *tcpc,
+ 				       enum typec_cc_status cc)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	struct device *dev = pmic_typec_port->dev;
+ 	unsigned int mode, currsrc;
+ 	unsigned int misc;
+@@ -533,7 +533,7 @@ static int qcom_pmic_typec_port_set_polarity(struct tcpc_dev *tcpc,
+ static int qcom_pmic_typec_port_set_vconn(struct tcpc_dev *tcpc, bool on)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	struct device *dev = pmic_typec_port->dev;
+ 	unsigned int orientation, misc, mask, value;
+ 	unsigned long flags;
+@@ -574,7 +574,7 @@ static int qcom_pmic_typec_port_start_toggling(struct tcpc_dev *tcpc,
+ 					       enum typec_cc_status cc)
+ {
+ 	struct pmic_typec *tcpm = tcpc_to_tcpm(tcpc);
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	struct device *dev = pmic_typec_port->dev;
+ 	unsigned int misc;
+ 	u8 mode = 0;
+@@ -638,7 +638,7 @@ static int qcom_pmic_typec_port_start_toggling(struct tcpc_dev *tcpc,
+ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
+ 				      struct tcpm_port *tcpm_port)
+ {
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	int i;
+ 	int mask;
+ 	int ret;
+@@ -688,7 +688,7 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
+ 
+ static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
+ {
+-	struct pmic_typec_port *pmic_typec_port = tcpm->pmic_typec_port;
++	struct pmic_typec_port *pmic_typec_port = tcpm->port_priv;
+ 	int i;
+ 
+ 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
+@@ -754,7 +754,7 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
+ 			return ret;
+ 	}
+ 
+-	tcpm->pmic_typec_port = pmic_typec_port;
++	tcpm->port_priv = pmic_typec_port;
+ 
+ 	tcpm->tcpc.get_vbus = qcom_pmic_typec_port_get_vbus;
+ 	tcpm->tcpc.set_vbus = qcom_pmic_typec_port_set_vbus;
+@@ -771,6 +771,7 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
+ }
+ 
+ const struct pmic_typec_port_resources pm8150b_port_res = {
++	.probe = qcom_pmic_typec_port_probe,
+ 	.irq_params = {
+ 		{
+ 			.irq_name = "vpd-detect",
+diff --git a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.h b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.h
+index 2ca83a46c..16ace6b9f 100644
+--- a/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.h
++++ b/drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port.h
+@@ -18,6 +18,11 @@ struct pmic_typec_port_irq_params {
+ };
+ 
+ struct pmic_typec_port_resources {
++	int (*probe)(struct platform_device *pdev,
++		     struct pmic_typec *tcpm,
++		     const struct pmic_typec_port_resources *res,
++		     struct regmap *regmap,
++		     u32 base);
+ 	unsigned int				nr_irqs;
+ 	const struct pmic_typec_port_irq_params	irq_params[PMIC_TYPEC_MAX_IRQS];
+ };
+@@ -25,6 +30,7 @@ struct pmic_typec_port_resources {
+ /* API */
+ 
+ extern const struct pmic_typec_port_resources pm8150b_port_res;
++extern const struct pmic_typec_port_resources pmi8998_port_res;
+ 
+ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
+ 			       struct pmic_typec *tcpm,
+-- 
+2.44.0
+

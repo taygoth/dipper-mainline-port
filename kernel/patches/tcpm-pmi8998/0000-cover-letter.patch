@@ -1,0 +1,71 @@
+From 09f409e51566e9660178ec75c89ffe394f09e2ba Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:28:13 +0500
+Subject: [PATCH 0/4] usb: typec: qcom-pmic: add PMI8998 port handler
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add PMI8998 USB Type-C support to the qcom-pmic TCPM driver by
+introducing a sibling port handler alongside the existing PM8150B /
+PMI632 code path.
+
+PMI8998's Type-C controller block at SPMI offset 0x1300 has a
+different register layout from PM8150B: different STATUS_4 bit
+positions, hardware-managed CC debounce, and a single rollup IRQ
+instead of separate CC and VBUS IRQs. PMI8998 also leaves the FSM in
+micro-USB mode out of reset and needs a four-write/three-delay
+bring-up dance before CC sensing starts. The PDPHY block at 0x1700
+is byte-identical to PM8150B and is reused via the existing
+pm8150b_pdphy_res.
+
+Patch 1 lifts the port-handler probe behind a per-resource function
+pointer so a future PMI8998 sibling can plug in next to pm8150b
+without touching the dispatcher.
+
+Patch 2 adds the PMI8998 port handler itself (one new file under
+drivers/usb/typec/tcpm/qcom/). The change in size from v1 is
+deliberate: rather than duplicating the entire port machinery, the
+new file only implements the seven tcpc_dev callbacks and the
+single-rollup ISR that are PMI8998-specific.
+
+Patches 3-4 add the SoC-level DT nodes (in pmi8998.dtsi, disabled by
+default) and enable Type-C on the OnePlus 6 / 6T common DT. The
+boards advertise dual power and data roles, a single 5V/1.5A source
+PDO and a single 5V/3A sink PDO, and a sink-vdos / sink-vdos-v1
+identity that lets PD3.0 partners ACK Discover_Identity without
+falling into a SOFT_RESET loop.
+
+Hardware validation:
+  - Xiaomi Mi 8 (dipper): end-to-end sink + host + role-swap + DRP
+    dock + PD partner identity ACK; see the dipper port series
+    sdm845-xiaomi-dipper.dts for the per-device DT.
+
+OnePlus 6 / 6T DT enablement is included but not yet hardware-tested
+in this repository snapshot.
+
+Base: Mobian linux-6.12-sdm845 6.12.91-1. The series is otherwise
+self-contained inside drivers/usb/typec/tcpm/qcom/ and a few DT
+files; it does not depend on the dipper port series, only on a
+recent enough drivers/usb/typec/tcpm/qcom/ baseline.
+
+Max Furman (4):
+  usb: typec: qcom-pmic: dispatch port backend via resource table
+  usb: typec: qcom-pmic: add PMI8998 port handler
+  arm64: dts: qcom: pmi8998: add Type-C and VBUS regulator nodes
+  arm64: dts: qcom: sdm845-oneplus-common: enable Type-C
+
+ arch/arm64/boot/dts/qcom/pmi8998.dtsi         |  33 +
+ .../boot/dts/qcom/sdm845-oneplus-common.dtsi  |  73 ++-
+ drivers/usb/typec/tcpm/qcom/Makefile          |   1 +
+ drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.c |  11 +-
+ drivers/usb/typec/tcpm/qcom/qcom_pmic_typec.h |   2 +-
+ .../typec/tcpm/qcom/qcom_pmic_typec_port.c    |  19 +-
+ .../typec/tcpm/qcom/qcom_pmic_typec_port.h    |   6 +
+ .../tcpm/qcom/qcom_pmic_typec_port_pmi8998.c  | 590 ++++++++++++++++++
+ 8 files changed, 719 insertions(+), 16 deletions(-)
+ create mode 100644 drivers/usb/typec/tcpm/qcom/qcom_pmic_typec_port_pmi8998.c
+
+-- 
+2.44.0
+

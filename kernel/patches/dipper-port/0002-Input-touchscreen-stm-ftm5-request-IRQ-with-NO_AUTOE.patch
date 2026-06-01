@@ -1,0 +1,49 @@
+From 4fce6f28e74555aee3b5ee0c7736ab01f27b623a Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:19:42 +0500
+Subject: [PATCH 2/9] Input: touchscreen/stm/ftm5: request IRQ with NO_AUTOEN
+
+`request_threaded_irq()` enables the interrupt as soon as the handler
+is installed. On the FTM5 driver this happens before
+`fts_chip_powercycle()` has finished bringing the controller up: a
+race where the controller fires an early edge before the host has
+finished configuring `IRQF_TRIGGER_LOW` polarity can lead to IRQ storm
+and a wedged controller (observed reliably on Mi 8 / dipper).
+
+Pass `IRQF_NO_AUTOEN` so the IRQ stays masked until the driver itself
+calls `fts_enableInterrupt()` during sensing initialization.
+
+The previously-commented call hints that the intended sequence already
+was "enable IRQ after powercycle"; this patch makes that explicit and
+race-free.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ drivers/input/touchscreen/stm/fts.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/input/touchscreen/stm/fts.c b/drivers/input/touchscreen/stm/fts.c
+index 8e35cf7a4..05d4510a6 100644
+--- a/drivers/input/touchscreen/stm/fts.c
++++ b/drivers/input/touchscreen/stm/fts.c
+@@ -3484,7 +3484,7 @@ static int fts_interrupt_install(struct fts_ts_info *info)
+ 	}
+ 
+ 	error = request_threaded_irq(info->client->irq, fts_isr,
+-			fts_interrupt_handler, IRQF_ONESHOT | IRQF_TRIGGER_LOW,
++			fts_interrupt_handler, IRQF_ONESHOT | IRQF_TRIGGER_LOW | IRQF_NO_AUTOEN,
+ 			FTS_TS_DRV_NAME, info);
+ 
+ 	if (error) {
+@@ -3628,7 +3628,7 @@ static int fts_init_sensing(struct fts_ts_info *info)
+ 
+ 	error |= fts_mode_handler(info, 0);	/* enable the features and
+ 						 * sensing */
+-	/* error |= fts_enableInterrupt(); */	/* enable the interrupt */
++	error |= fts_enableInterrupt();	/* enable the interrupt */
+ 	error |= fts_resetDisableIrqCount();
+ 
+ 	if (error < OK)
+-- 
+2.44.0
+

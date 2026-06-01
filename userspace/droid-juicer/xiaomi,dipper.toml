@@ -1,0 +1,35 @@
+[juicer]
+firmware = [
+    { partition = "vendor", origin = "firmware", destination = "qcom/sdm845/dipper", files = [
+            { name = "a630_zap.mdt" },
+            { name = "ipa_fws.mdt" },
+        ] },
+    { partition = "vendor", origin = "firmware", destination = "", files = [
+            { name = "tas2557_uCDSP_aac.bin", rename = "tas2557_uCDSP.bin" },
+        ] },
+    { partition = "persist", origin = "audio", destination = "ti/tas2557", files = [
+            { name = "tas2557_cal.bin" },
+        ] },
+    { partition = "modem", origin = "image", destination = "qcom/sdm845/dipper", files = [
+            { name = "adsp.mdt" },
+            { name = "adspr.jsn" },
+            { name = "adspua.jsn" },
+            { name = "cdsp.mdt" },
+            { name = "cdspr.jsn" },
+            { name = "mba.mbn" },
+            { name = "modem.mdt" },
+            { name = "modemr.jsn" },
+            { name = "modemuw.jsn" },
+            { name = "slpi.mdt" },
+            { name = "slpir.jsn" },
+            { name = "slpius.jsn" },
+            { name = "venus.mdt" },
+            { name = "wlanmdsp.mbn" },
+        ] },
+    { partition = "bluetooth", origin = "image", destination = "qca/dipper", files = [
+            { name = "crnv21.bin" },
+        ] },
+    { partition = "bluetooth", origin = "image", destination = "qca", files = [
+            { name = "crbtfw21.tlv" },
+        ] },
+]

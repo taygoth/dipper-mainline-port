@@ -1,0 +1,55 @@
+From 40958de7971bddc3e2631935a6c01c9d97e88b5b Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:19:42 +0500
+Subject: [PATCH 1/9] Input: touchscreen/stm/ftm5: throttle zero-pressure
+ warning
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The pointer event handler logs an error every time the firmware reports
+pressure 0 with the contact still present. On firmware variants that
+always report pressure 0 (observed on Mi 8 / dipper with Xiaomi's
+`st_fts_e1.ftb`), this fires once per CSI event — tens of `pr_err`
+lines per touch tap and hundreds per swipe. The driver already clamps
+the value to 1 to keep the touch alive, so the only effect is dmesg
+flooding.
+
+Replace `pr_err()` with `pr_warn_once()` so the diagnostic still
+surfaces firmware quirks on first occurrence but does not drown the log
+on continued operation. Behaviour on firmware that does report real
+pressure is unchanged (the warning never triggers).
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ drivers/input/touchscreen/stm/fts.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/input/touchscreen/stm/fts.c b/drivers/input/touchscreen/stm/fts.c
+index ed33835e8..8e35cf7a4 100644
+--- a/drivers/input/touchscreen/stm/fts.c
++++ b/drivers/input/touchscreen/stm/fts.c
+@@ -2481,13 +2481,14 @@ static bool fts_enter_pointer_event_handler(struct fts_ts_info *info, unsigned
+ 	y = ((int)event[4] << 4) | ((event[3] & 0xF0) >> 4);
+ 	z = (int)event[5];
+ 	if (z <= 0) {
+-		/* Should not happen, because zero pressure implies contact has
+-		 * left, so this function should not be invoked. For safety, to
+-		 * prevent this touch from being dropped, set to smallest
+-		 * pressure value instead
++		/* Some firmware variants (observed: Mi 8/dipper
++		 * st_fts_e1.ftb) always report pressure 0 on every event.
++		 * Clamp to smallest non-zero pressure so the touch is not
++		 * dropped, and warn once so the firmware quirk stays visible
++		 * without flooding dmesg.
+ 		 */
+-		pr_err("%s: Pressure is %i, but pointer is not leaving\n",
+-		       __func__, z);
++		pr_warn_once("%s: firmware reports zero pressure, clamping to 1\n",
++			     __func__);
+ 		z = 1; /* smallest non-zero pressure value */
+ 	}
+ 	major = (int)(((event[0] & 0x0C) << 2) | ((event[6] & 0xF0) >> 4));
+-- 
+2.44.0
+

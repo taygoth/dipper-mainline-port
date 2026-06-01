@@ -1,0 +1,83 @@
+From dd8efefee6d0b478aaaa739db5e583636c01d5e9 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:28:12 +0500
+Subject: [PATCH 0/9] Xiaomi Mi 8 (dipper) Mobian/mainline support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add Mobian/mainline support for the Xiaomi Mi 8 (codename "dipper"),
+a SDM845-based smartphone.
+
+This series brings up:
+
+  - display (Samsung EA8074 DSI command-mode AMOLED)
+  - touchscreen (FTM5 / STMicro fts) on the Mobian carry driver
+  - rear main camera (Sony IMX363)
+  - audio (WCD9340 codec, TAS2557 speaker amp, q6voice path)
+  - Wi-Fi (ath10k WCN3990), Bluetooth (WCN3990 UART6)
+  - modem data, SMS and voice calls
+  - USB-C / Type-C / USB-PD via the PMI8998 TCPM driver
+    (added in a companion tcpm-pmi8998 series; the dipper DT
+    enables it through the connector subnode + sink-vdos identity)
+  - UFS storage, GPU (A630)
+  - fuel gauge, charger and volume keys
+
+Patches 1-3 are fixes for the Mobian carry FTM5 touchscreen driver;
+patches 4-5 add the Samsung EA8074 panel driver and binding; patch 6
+reorders the IMX363 power-on sequence to match the Sony datasheet;
+patch 7 adds the TAS2557 ASoC driver; patches 8-9 add the dipper
+board DT and enable the required driver modules in sdm845_defconfig.
+
+Build note: the board DTS references PMI8998 Type-C/VBUS nodes
+from the companion tcpm-pmi8998 series. Apply tcpm-pmi8998 first,
+or apply both series before building the dipper DTB.
+
+Tested on the "Dipper new MP v2.1" board variant with the p0 camera
+pinout and a Semco-packaged IMX363 rear sensor. Other Mi 8 board or
+camera variants may need DTS changes.
+
+Base: Mobian linux-6.12-sdm845 6.12.91-1 (linux-6.12.91 with the
+Mobian patch stack applied). This series does not apply on top of a
+vanilla linux-6.12.91 tree: it depends on the Mobian carry FTM5
+driver, IMX363 driver, and several Mobian sdm845 DT and config
+patches being already present.
+
+This patch set is intended for Mobian salsa MR review before going
+through the more granular upstream process (mainline send-email for
+the parts that fit, downstream carry for the rest).
+
+Max Furman (9):
+  Input: touchscreen/stm/ftm5: throttle zero-pressure warning
+  Input: touchscreen/stm/ftm5: request IRQ with NO_AUTOEN
+  Input: touchscreen/stm/ftm5: allow board to narrow active scan mask
+  dt-bindings: display: panel: Add Samsung EA8074
+  drm/panel: samsung: Add driver for Samsung EA8074
+  media: i2c: imx363: start MCLK before supplies
+  ASoC: codecs: add TAS2557 smart amplifier driver
+  arm64: dts: qcom: add Xiaomi Mi 8 (dipper)
+  arm64: configs: sdm845: enable Mi 8 (dipper) driver modules
+
+ .../display/panel/samsung,ea8074.yaml         |   73 +
+ arch/arm64/boot/dts/qcom/Makefile             |    1 +
+ .../boot/dts/qcom/sdm845-xiaomi-dipper.dts    | 1162 ++++++++++++++++
+ arch/arm64/configs/sdm845_defconfig           |    4 +
+ drivers/gpu/drm/panel/Kconfig                 |   12 +
+ drivers/gpu/drm/panel/Makefile                |    1 +
+ drivers/gpu/drm/panel/panel-samsung-ea8074.c  |  347 +++++
+ drivers/input/touchscreen/stm/fts.c           |   38 +-
+ drivers/input/touchscreen/stm/fts.h           |    3 +
+ .../input/touchscreen/stm/fts_lib/ftsTool.c   |    2 +-
+ drivers/media/i2c/imx363.c                    |   23 +-
+ sound/soc/codecs/Kconfig                      |   10 +
+ sound/soc/codecs/Makefile                     |    2 +
+ sound/soc/codecs/tas2557.c                    | 1230 +++++++++++++++++
+ 14 files changed, 2882 insertions(+), 26 deletions(-)
+ create mode 100644 Documentation/devicetree/bindings/display/panel/samsung,ea8074.yaml
+ create mode 100644 arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts
+ create mode 100644 drivers/gpu/drm/panel/panel-samsung-ea8074.c
+ create mode 100644 sound/soc/codecs/tas2557.c
+
+-- 
+2.44.0
+

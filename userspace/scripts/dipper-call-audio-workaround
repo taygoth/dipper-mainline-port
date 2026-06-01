@@ -1,0 +1,61 @@
+#!/bin/sh
+# Keep the q6voice/WCD934x playback path active during calls so
+# VoiceMMode1 frames reach the earpiece route. Based on the
+# postmarketOS sdm845 call-audio workaround, with dipper-specific
+# routing changes.
+
+set -eu
+
+trap 'pkill -9 -P $$ 2>/dev/null; exit 0' INT TERM
+
+interface=org.freedesktop.ModemManager1.Call
+member=StateChanged
+
+dbus-monitor --system "type='signal',interface=${interface},member=${member}" |
+while read -r line; do
+	state=$(echo "$line" | awk '/\<int32\>/ {print $2}')
+	[ -n "$state" ] || continue
+
+	# Call State (MMCallState):
+	#  0 = unknown, 1 = dialing, 2 = ringing-out,
+	#  3 = ringing-in, 4 = active, 5 = held, 6 = waiting, 7 = terminated.
+	# Treat any non-terminated transition as "call running".
+	case "$state" in
+	0|1|2|3|4|5|6)
+		echo "Call running ($state)"
+
+		pidof pulseaudio >/dev/null 2>&1 && \
+			pactl unload-module module-suspend-on-idle 2>/dev/null || true
+
+		# WirePlumber path: a dummy Audio/Source loopback keeps the
+		# session running so the card is not suspended.
+		if ! pgrep -x pw-loopback >/dev/null; then
+			sleep 1
+			pw-loopback -m '[FL FR]' --playback-props='media.class=Audio/Source' &
+		fi
+
+		# Active PCM on hw:0,0 forces SLIM RX0 / WCD934x AIF1 Playback
+		# DAI to be programmed, so voice frames out of q6afe actually
+		# reach EAR PA. Launch via setsid+nohup so the child survives
+		# the inevitable cleanup signals.
+		if ! pgrep -f 'aplay.*hw:0,0.*/dev/zero' >/dev/null 2>&1; then
+			setsid -f sh -c 'exec aplay -q -t raw -f S16_LE -r 48000 -c 2 -D plughw:0,0 /dev/zero' \
+				</dev/null >/dev/null 2>&1 &
+		fi
+		;;
+	7)
+		echo "Call terminated"
+		pkill -x pw-loopback 2>/dev/null || true
+		pkill -f 'aplay.*hw:0,0.*/dev/zero' 2>/dev/null || true
+		# WirePlumber leaves a stale Default Configured Devices entry
+		# pointing at the destroyed Voice_Call__Earpiece__sink after the
+		# call ends, which makes Phosh fall back to Dummy Output.
+		# Clearing it lets WirePlumber re-pick the HiFi Speaker sink.
+		wpctl clear-default 2>/dev/null || true
+		pidof pulseaudio >/dev/null 2>&1 && \
+			pactl load-module module-suspend-on-idle 2>/dev/null || true
+		;;
+	esac
+done &
+
+wait

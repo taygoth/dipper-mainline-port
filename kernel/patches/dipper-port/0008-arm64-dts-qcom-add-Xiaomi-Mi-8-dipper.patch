@@ -1,0 +1,1218 @@
+From d0612cbc8c7507566f2d967f541754698cfe33f3 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:22:25 +0500
+Subject: [PATCH 8/9] arm64: dts: qcom: add Xiaomi Mi 8 (dipper)
+
+Add a device tree for the Xiaomi Mi 8 (codename "dipper"),
+a SDM845-based smartphone.
+
+Working with this DT and the matching userspace overlay:
+display (Samsung EA8074), touchscreen (FTM5), rear main camera
+(IMX363), audio (WCD9340 codec, TAS2557 speaker amp, q6voice path),
+Wi-Fi (ath10k WCN3990), Bluetooth (WCN3990 UART6), modem data,
+SMS and voice calls, USB peripheral, UFS storage, GPU (A630),
+fuel gauge, charger and volume keys.
+
+USB-C: enables PMI8998 Type-C through the multi-chip TCPM driver
+with USB-PD restricted to a single 5V PDO (safe profile). sink-vdos
+identity advertised so PD partners ACK Discover_Identity without
+issuing SOFT_RESET. dwc3 in OTG mode with usb-role-switch wired to
+the PMI8998 TCPM connector subnode.
+
+SLPI is intentionally left disabled until a mainline-side sensor
+consumer exists.
+
+The DT describes one tested physical variant ("new MP v2.1",
+p0 camera pinout, Semco IMX363); other Mi 8 variants may need
+DT changes.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ arch/arm64/boot/dts/qcom/Makefile             |    1 +
+ .../boot/dts/qcom/sdm845-xiaomi-dipper.dts    | 1162 +++++++++++++++++
+ 2 files changed, 1163 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts
+
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index e62211069..c8b512ae1 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -222,6 +222,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-sony-xperia-tama-akari.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-sony-xperia-tama-akatsuki.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-sony-xperia-tama-apollo.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-xiaomi-beryllium-ebbg.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-xiaomi-dipper.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-xiaomi-beryllium-tianma.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-xiaomi-polaris.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sdm845-shift-axolotl.dtb
+diff --git a/arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts b/arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts
+new file mode 100644
+index 000000000..8e1b568f1
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sdm845-xiaomi-dipper.dts
+@@ -0,0 +1,1162 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Xiaomi Mi 8 (dipper) device tree.
++ *
++ * Copyright (c) 2026 Max Furman <taygoth@gmail.com>
++ *
++ * Tested on the "Dipper new MP v2.1" board variant with the p0 camera
++ * pinout and a Semco-packaged IMX363 rear sensor (i2c address 0x1a;
++ * Liteon IMX363 modules answer at 0x10).
++ *
++ * Other Mi 8 board / camera / sensor variants are likely to need DT
++ * changes (regulator GPIOs, camera pinmap, sensor address) and should
++ * land as separate board files or DT overlays rather than being merged
++ * here.
++ */
++
++/dts-v1/;
++
++#include <dt-bindings/firmware/qcom,scm.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/phy/phy-qcom-qusb2.h>
++#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++#include <dt-bindings/sound/qcom,q6afe.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/sound/qcom,q6voice.h>
++#include <dt-bindings/usb/pd.h>
++#include "sdm845.dtsi"
++#include "sdm845-wcd9340.dtsi"
++#include "pm8998.dtsi"
++#include "pmi8998.dtsi"
++
++/delete-node/ &tz_mem;
++/delete-node/ &adsp_mem;
++/delete-node/ &wlan_msa_mem;
++/delete-node/ &mpss_region;
++/delete-node/ &venus_mem;
++/delete-node/ &cdsp_mem;
++/delete-node/ &mba_region;
++/delete-node/ &slpi_mem;
++/delete-node/ &spss_mem;
++/delete-node/ &rmtfs_mem;
++
++/ {
++	model = "Xiaomi Mi 8";
++	compatible = "xiaomi,dipper", "qcom,sdm845";
++
++	qcom,msm-id = <321 0x20001>;
++	qcom,board-id = <55 0>;
++
++	aliases {
++		serial0 = &uart9;
++		serial1 = &uart6;
++		display0 = &framebuffer0;
++	};
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		stdout-path = "display0";
++
++		framebuffer0: framebuffer@9d400000 {
++			compatible = "simple-framebuffer";
++			reg = <0 0x9d400000 0 (1080 * 2248 * 4)>;
++			width = <1080>;
++			height = <2248>;
++			stride = <(1080 * 4)>;
++			format = "a8r8g8b8";
++		};
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++		autorepeat;
++		pinctrl-names = "default";
++		pinctrl-0 = <&key_vol_up_default>;
++
++		key-volume-up {
++			label = "Volume Up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pm8998_gpios 6 GPIO_ACTIVE_LOW>;
++			wakeup-source;
++			debounce-interval = <15>;
++		};
++	};
++
++	disp_vddio_vreg: disp-vddio-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "disp_vddio_vreg";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		startup-delay-us = <4000>;
++		enable-active-high;
++		regulator-boot-on;
++		gpio = <&tlmm 23 GPIO_ACTIVE_HIGH>;
++	};
++
++	cam_ir_vana_2p8: cam-ir-vana-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_ir_vana_2p8";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		regulator-enable-ramp-delay = <100>;
++		enable-active-high;
++		gpio = <&tlmm 44 GPIO_ACTIVE_HIGH>;
++		vin-supply = <&vreg_bob>;
++	};
++
++	cam_ir_vdig_1p5: cam-ir-vdig-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_ir_vdig_1p5";
++		regulator-min-microvolt = <1500000>;
++		regulator-max-microvolt = <1500000>;
++		regulator-enable-ramp-delay = <233>;
++		enable-active-high;
++		gpio = <&tlmm 22 GPIO_ACTIVE_HIGH>;
++		vin-supply = <&vreg_s4a_1p8>;
++	};
++
++	cam_vio_2p8: cam-vio-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_vio_2p8";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		regulator-enable-ramp-delay = <135>;
++		enable-active-high;
++		gpio = <&tlmm 75 GPIO_ACTIVE_HIGH>;
++	};
++
++	camera_vdig_ldo: reg_camera_vdig_ldo {
++		compatible = "regulator-fixed";
++		regulator-name = "camera_vdig_ldo";
++		regulator-min-microvolt = <1350000>;
++		regulator-max-microvolt = <1350000>;
++		regulator-enable-ramp-delay = <135>;
++		enable-active-high;
++		gpio = <&tlmm 99 GPIO_ACTIVE_HIGH>;
++		vin-supply = <&vreg_bob>;
++	};
++
++	/*
++	 * IMX363 needs the additional enable rails used by the vendor
++	 * board design (TLMM 12, TLMM 40, PMI8998 GPIO 11) in addition
++	 * to VANA/VDIG/VIO; without them the sensor NAKs its i2c
++	 * address. Modeled as regulator-fixed so the regulator core
++	 * latches them HIGH during boot.
++	 */
++	cam_rear_avdd1_1p8: cam-rear-avdd1-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_rear_avdd1_1p8";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		regulator-enable-ramp-delay = <135>;
++		regulator-always-on;
++		enable-active-high;
++		gpio = <&tlmm 12 GPIO_ACTIVE_HIGH>;
++	};
++
++	cam_rear_avdd2_2p8: cam-rear-avdd2-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_rear_avdd2_2p8";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		regulator-enable-ramp-delay = <135>;
++		regulator-always-on;
++		enable-active-high;
++		gpio = <&tlmm 40 GPIO_ACTIVE_HIGH>;
++	};
++
++	cam_rear_dvdd: cam-rear-dvdd-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_rear_dvdd";
++		regulator-min-microvolt = <1050000>;
++		regulator-max-microvolt = <1050000>;
++		regulator-enable-ramp-delay = <135>;
++		regulator-always-on;
++		enable-active-high;
++		gpio = <&pm8998_gpios 11 GPIO_ACTIVE_HIGH>;
++	};
++
++	reserved-memory {
++		linux,cma {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0 0x00000000 0 0xffffffff>;
++			reusable;
++			alignment = <0 0x400000>;
++			size = <0 0x2c00000>;
++			linux,cma-default;
++		};
++
++		adsp_mem: memory@8c500000 {
++			reg = <0 0x8c500000 0 0x1e00000>;
++			no-map;
++		};
++
++		wlan_msa_mem: memory@8e300000 {
++			reg = <0 0x8e300000 0 0x100000>;
++			no-map;
++		};
++
++		mpss_region: memory@8e400000 {
++			reg = <0 0x8e400000 0 0x7800000>;
++			no-map;
++		};
++
++		venus_mem: memory@95c00000 {
++			reg = <0 0x95c00000 0 0x500000>;
++			no-map;
++		};
++
++		cdsp_mem: memory@96100000 {
++			reg = <0 0x96100000 0 0x800000>;
++			no-map;
++		};
++
++		mba_region: memory@96900000 {
++			reg = <0 0x96900000 0 0x200000>;
++			no-map;
++		};
++
++		slpi_mem: memory@96b00000 {
++			reg = <0 0x96b00000 0 0x1400000>;
++			no-map;
++		};
++
++		spss_mem: memory@97f00000 {
++			reg = <0 0x97f00000 0 0x100000>;
++			no-map;
++		};
++
++		rmtfs_mem: memory@f7301000 {
++			compatible = "qcom,rmtfs-mem";
++			reg = <0 0xf7301000 0 0x200000>;
++			no-map;
++
++			qcom,client-id = <1>;
++			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
++		};
++
++		/* Mi 8 bootloader reserves this range for its own use. */
++		removed_region: memory@88f00000 {
++			reg = <0 0x88f00000 0 0x200000>;
++			no-map;
++		};
++
++		ramoops: ramoops@b0000000 {
++			compatible = "ramoops";
++			reg = <0 0xb0000000 0 0x00400000>;
++			record-size = <0x40000>;
++			console-size = <0x40000>;
++			ftrace-size = <0x40000>;
++			pmsg-size = <0x200000>;
++		};
++	};
++
++	vph_pwr: vph-pwr-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vph_pwr";
++		regulator-min-microvolt = <3700000>;
++		regulator-max-microvolt = <3700000>;
++	};
++
++	battery: battery {
++		compatible = "simple-battery";
++
++		charge-full-design-microamp-hours = <3400000>;
++		voltage-min-design-microvolt = <3400000>;
++		voltage-max-design-microvolt = <4400000>;
++	};
++
++	/* PM8998 S4 is boot-on at 1.8 V; modeled as a fixed regulator. */
++	vreg_s4a_1p8: vreg-s4a-1p8 {
++		compatible = "regulator-fixed";
++		regulator-name = "vreg_s4a_1p8";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		regulator-always-on;
++		regulator-boot-on;
++		vin-supply = <&vph_pwr>;
++	};
++};
++
++&adsp_pas {
++	firmware-name = "qcom/sdm845/dipper/adsp.mbn";
++	status = "okay";
++};
++
++&apps_rsc {
++	pm8998-rpmh-regulators {
++		compatible = "qcom,pm8998-rpmh-regulators";
++		qcom,pmic-id = "a";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-s4-supply = <&vph_pwr>;
++		vdd-s5-supply = <&vph_pwr>;
++		vdd-s6-supply = <&vph_pwr>;
++		vdd-s7-supply = <&vph_pwr>;
++		vdd-s8-supply = <&vph_pwr>;
++		vdd-s9-supply = <&vph_pwr>;
++		vdd-s10-supply = <&vph_pwr>;
++		vdd-s11-supply = <&vph_pwr>;
++		vdd-s12-supply = <&vph_pwr>;
++		vdd-s13-supply = <&vph_pwr>;
++		vdd-l1-l27-supply = <&vreg_s7a_1p025>;
++		vdd-l2-l8-l17-supply = <&vreg_s3a_1p35>;
++		vdd-l3-l11-supply = <&vreg_s7a_1p025>;
++		vdd-l4-l5-supply = <&vreg_s7a_1p025>;
++		vdd-l6-supply = <&vph_pwr>;
++		vdd-l7-l12-l14-l15-supply = <&vreg_s5a_2p04>;
++		vdd-l9-supply = <&vreg_bob>;
++		vdd-l10-l23-l25-supply = <&vreg_bob>;
++		vdd-l13-l19-l21-supply = <&vreg_bob>;
++		vdd-l16-l28-supply = <&vreg_bob>;
++		vdd-l18-l22-supply = <&vreg_bob>;
++		vdd-l20-l24-supply = <&vreg_bob>;
++		vdd-l26-supply = <&vreg_s3a_1p35>;
++		vin-lvs-1-2-supply = <&vreg_s4a_1p8>;
++
++		vreg_s2a_1p125: smps2 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1100000>;
++		};
++
++		vreg_s3a_1p35: smps3 {
++			regulator-min-microvolt = <1352000>;
++			regulator-max-microvolt = <1352000>;
++		};
++
++		vreg_s5a_2p04: smps5 {
++			regulator-min-microvolt = <1904000>;
++			regulator-max-microvolt = <2040000>;
++		};
++
++		vreg_s7a_1p025: smps7 {
++			regulator-min-microvolt = <900000>;
++			regulator-max-microvolt = <1028000>;
++		};
++
++		vreg_l1a_0p875: ldo1 {
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <880000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l2a_1p2: ldo2 {
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-always-on;
++		};
++
++		vreg_l5a_0p8: ldo5 {
++			regulator-min-microvolt = <800000>;
++			regulator-max-microvolt = <800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l7a_1p8: ldo7 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l12a_1p8: ldo12 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l14a_1p8: ldo14 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-boot-on;
++			regulator-always-on;
++		};
++
++		vreg_l17a_1p3: ldo17 {
++			regulator-min-microvolt = <1304000>;
++			regulator-max-microvolt = <1304000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l20a_2p95: ldo20 {
++			regulator-min-microvolt = <2950000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l23a_3p3: ldo23 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l24a_3p075: ldo24 {
++			regulator-min-microvolt = <3088000>;
++			regulator-max-microvolt = <3088000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l25a_3p3: ldo25 {
++			regulator-min-microvolt = <3300000>;
++			regulator-max-microvolt = <3312000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l26a_1p2: ldo26 {
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-boot-on;
++		};
++
++	vreg_l28a_3p3: ldo28 {
++		regulator-min-microvolt = <2856000>;
++		regulator-max-microvolt = <3008000>;
++		regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++	};
++
++	/* L22: rear-main IMX363 VANA. */
++	vreg_l22a_2p864: ldo22 {
++		regulator-min-microvolt = <2864000>;
++		regulator-max-microvolt = <2864000>;
++		regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	/* LVS1: camera I2C IOVDD. */
++	vreg_lvs1a_1p8: lvs1 {
++		regulator-always-on;
++		regulator-boot-on;
++	};
++	};
++
++	pmi8998-rpmh-regulators {
++		compatible = "qcom,pmi8998-rpmh-regulators";
++		qcom,pmic-id = "b";
++
++		vdd-bob-supply = <&vph_pwr>;
++
++		vreg_bob: bob {
++			regulator-min-microvolt = <3312000>;
++			regulator-max-microvolt = <3600000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
++			regulator-allow-bypass;
++		};
++	};
++};
++
++&cdsp_pas {
++	status = "disabled";
++};
++
++&camss {
++	status = "okay";
++
++	vdda-phy-supply = <&vreg_l1a_0p875>;
++	vdda-pll-supply = <&vreg_l26a_1p2>;
++
++	ports {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		port@0 {
++			reg = <0>;
++
++			csiphy0_ep: endpoint {
++				clock-lanes = <7>;
++				data-lanes = <0 1 2 3>;
++				remote-endpoint = <&imx363_ep>;
++			};
++		};
++
++		port@1 {
++			reg = <1>;
++
++			csiphy1_ep: endpoint {
++				clock-lanes = <7>;
++				data-lanes = <0>;
++				remote-endpoint = <&ov7251_ep>;
++			};
++		};
++	};
++};
++
++&cci {
++	status = "okay";
++};
++
++&cci_i2c0 {
++	camera@1a {
++		compatible = "sony,imx363";
++		reg = <0x1a>;
++
++		clocks = <&clock_camcc CAM_CC_MCLK0_CLK>;
++		clock-names = "xvclk";
++		clock-frequency = <24000000>;
++
++		vif-supply = <&cam_vio_2p8>;
++		vana-supply = <&vreg_l22a_2p864>;
++		vdig-supply = <&camera_vdig_ldo>;
++
++		reset-gpios = <&tlmm 119 GPIO_ACTIVE_HIGH>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_sensor_mclk0_active &cam_sensor_rear_active>;
++
++		orientation = <0>;
++		rotation = <270>;
++
++		port {
++			imx363_ep: endpoint {
++				clock-lanes = <1>;
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <636000000>;
++				remote-endpoint = <&csiphy0_ep>;
++			};
++		};
++	};
++};
++
++&cci_i2c1 {
++	camera@60 {
++		compatible = "ovti,ov7251";
++		reg = <0x60>;
++
++		clocks = <&clock_camcc CAM_CC_MCLK1_CLK>;
++		clock-names = "xclk";
++		clock-frequency = <24000000>;
++
++		vdddo-supply = <&cam_vio_2p8>;
++		vdda-supply = <&cam_ir_vana_2p8>;
++		vddd-supply = <&cam_ir_vdig_1p5>;
++
++		enable-gpios = <&tlmm 25 GPIO_ACTIVE_HIGH>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_sensor_mclk1_active &cam_sensor_ir_active>;
++
++		port {
++			ov7251_ep: endpoint {
++				clock-lanes = <1>;
++				data-lanes = <0>;
++				link-frequencies = /bits/ 64 <240000000 319200000>;
++				remote-endpoint = <&csiphy1_ep>;
++			};
++		};
++	};
++};
++
++&dispcc {
++	status = "okay";
++};
++
++&gcc {
++	protected-clocks = <GCC_QSPI_CORE_CLK>,
++			   <GCC_QSPI_CORE_CLK_SRC>,
++			   <GCC_QSPI_CNOC_PERIPH_AHB_CLK>,
++			   <GCC_LPASS_Q6_AXI_CLK>,
++			   <GCC_LPASS_SWAY_CLK>;
++};
++
++&gpi_dma1 {
++	status = "okay";
++};
++
++&gmu {
++	status = "okay";
++};
++
++&gpu {
++	status = "okay";
++
++	zap-shader {
++		memory-region = <&gpu_mem>;
++		firmware-name = "qcom/sdm845/dipper/a630_zap.mbn";
++	};
++};
++
++&ibb {
++	regulator-min-microvolt = <4600000>;
++	regulator-max-microvolt = <6000000>;
++	regulator-over-current-protection;
++	regulator-pull-down;
++	regulator-soft-start;
++	qcom,discharge-resistor-kohms = <300>;
++};
++
++&ipa {
++	qcom,gsi-loader = "self";
++	memory-region = <&ipa_fw_mem>;
++	firmware-name = "qcom/sdm845/dipper/ipa_fws.mbn";
++
++	status = "okay";
++};
++
++&lab {
++	regulator-min-microvolt = <4600000>;
++	regulator-max-microvolt = <6000000>;
++	regulator-pull-down;
++	regulator-soft-start;
++};
++
++&mdss {
++	status = "okay";
++};
++
++&mdss_dsi0 {
++	status = "okay";
++	vdda-supply = <&vreg_l26a_1p2>;
++
++	display_panel: panel@0 {
++		compatible = "samsung,ea8074";
++		reg = <0>;
++
++		vddio-supply = <&vreg_l14a_1p8>;
++		elvdd-supply = <&lab>;
++		elvss-supply = <&ibb>;
++
++		reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
++
++		status = "okay";
++
++		port {
++			panel_in_0: endpoint {
++				remote-endpoint = <&mdss_dsi0_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	remote-endpoint = <&panel_in_0>;
++	data-lanes = <0 1 2 3>;
++};
++
++&mdss_dsi0_phy {
++	status = "okay";
++	vdds-supply = <&vreg_l1a_0p875>;
++};
++
++&mss_pil {
++	firmware-name = "qcom/sdm845/dipper/mba.mbn", "qcom/sdm845/dipper/modem.mbn";
++
++	status = "okay";
++};
++
++&gpi_dma0 {
++	status = "okay";
++};
++
++&pmi8998_charger {
++	monitored-battery = <&battery>;
++
++	status = "okay";
++};
++
++&pmi8998_lsid0 {
++	pmi8998_fg: fuel-gauge@4000 {
++		compatible = "qcom,pmi8998-fg";
++		reg = <0x4000>;
++
++		interrupts = <0x2 0x40 0x3 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "soc-delta";
++
++		power-supplies = <&pmi8998_charger>;
++		monitored-battery = <&battery>;
++
++		status = "okay";
++	};
++};
++
++&pmi8998_typec {
++	status = "okay";
++
++	vdd-pdphy-supply = <&vreg_s4a_1p8>;
++
++	connector {
++		compatible = "usb-c-connector";
++		label = "USB-C";
++		power-role = "dual";
++		data-role = "dual";
++		try-power-role = "sink";
++
++		op-sink-microwatt = <15000000>;
++
++		source-pdos = <PDO_FIXED(5000, 1500,
++					 PDO_FIXED_DUAL_ROLE |
++					 PDO_FIXED_USB_COMM |
++					 PDO_FIXED_DATA_SWAP)>;
++
++		sink-pdos = <PDO_FIXED(5000, 3000,
++				       PDO_FIXED_DUAL_ROLE |
++				       PDO_FIXED_USB_COMM |
++				       PDO_FIXED_DATA_SWAP)>;
++
++		/*
++		 * PD3.0 Discover Identity response used by partners that
++		 * request identity after SNK_READY.
++		 */
++		sink-vdos-v1 = <
++			VDO_IDH(0, 1, IDH_PTYPE_PERIPH, 0, 0, 0, 0x1d6b)
++			VDO_CERT(0)
++			VDO_PRODUCT(0xff45, 0x0100)
++		>;
++		sink-vdos = <
++			VDO_IDH(0, 1, IDH_PTYPE_PERIPH, 0,
++				IDH_PTYPE_NOT_DFP, 0, 0x1d6b)
++			VDO_CERT(0)
++			VDO_PRODUCT(0xff45, 0x0100)
++			VDO_UFP(UFP_VDO_VER1_2, DEV_USB2_CAPABLE,
++				UFP_RECEPTACLE, 0, 0, 0, 0, 0)
++		>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				pmi8998_hs_in: endpoint {
++					remote-endpoint = <&usb_1_dwc3_hs>;
++				};
++			};
++		};
++	};
++};
++
++&pmi8998_vbus {
++	regulator-min-microamp = <500000>;
++	regulator-max-microamp = <1500000>;
++	status = "okay";
++};
++
++/* The Mi 8 uses an AMOLED panel with DCS brightness control; the
++ * PMI8998 WLED has no LED string wired to it. Keep it disabled.
++ */
++&pmi8998_wled {
++	status = "disabled";
++};
++
++&pm8998_gpios {
++	key_vol_up {
++		key_vol_up_default: key-vol-up-default-state {
++			pins = "gpio6";
++			function = "normal";
++			input-enable;
++			bias-pull-up;
++			power-source = <0>;
++		};
++	};
++
++	/* Rear-camera IMX363 dvdd enable (regulator-fixed cam_rear_dvdd). */
++	cam_rear_dvdd_en {
++		cam_rear_dvdd_en_default: cam-rear-dvdd-en-default-state {
++			pins = "gpio11";
++			function = "normal";
++			output-enable;
++			power-source = <0>;
++		};
++	};
++};
++
++&pm8998_resin {
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++&q6afedai {
++	dai@22 {
++		reg = <QUATERNARY_MI2S_RX>;
++		qcom,sd-lines = <0>;
++	};
++};
++
++&q6asmdai {
++	dai@0 {
++		reg = <0>;
++	};
++
++	dai@1 {
++		reg = <1>;
++	};
++
++	dai@2 {
++		reg = <2>;
++	};
++
++	dai@3 {
++		reg = <3>;
++	};
++};
++
++&q6mvm {
++	status = "okay";
++};
++
++&q6cvs {
++	status = "okay";
++};
++
++&q6cvp {
++	status = "okay";
++};
++
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&qupv3_id_1 {
++	status = "okay";
++};
++
++&i2c5 {
++	status = "okay";
++
++	tas2557: speaker-amp@4c {
++		compatible = "ti,tas2557";
++		reg = <0x4c>;
++
++		interrupts-extended = <&tlmm 30 IRQ_TYPE_LEVEL_HIGH>;
++
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Speaker Amp";
++
++		ti,cdc-reset-gpio = <&tlmm 76 GPIO_ACTIVE_HIGH>;
++		ti,irq-gpio = <&tlmm 30 GPIO_ACTIVE_HIGH>;
++		ti,i2s-bits = <16>;
++		ti,bypass-tmax = <0>;
++
++		status = "okay";
++	};
++};
++
++&i2c14 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	touchscreen@49 {
++		compatible = "st,fts";
++		reg = <0x49>;
++
++		interrupts-extended = <&tlmm 31 IRQ_TYPE_LEVEL_LOW>;
++
++		avdd-supply = <&vreg_l28a_3p3>;
++		vdd-supply = <&disp_vddio_vreg>;
++
++		pinctrl-0 = <&ts_active>;
++		pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
++		pinctrl-names = "default", "sleep";
++
++		st,irq-gpio = <&tlmm 31 GPIO_ACTIVE_HIGH>;
++		st,reset-gpio = <&tlmm 32 GPIO_ACTIVE_HIGH>;
++		st,firmware_name = "st_fts_e1.ftb";
++		st,max-coords = <1079 2247>;
++		st,regulator_dvdd = "vdd";
++		st,regulator_avdd = "avdd";
++
++		/* The Mi 8 FTS firmware locks up on the driver's 0xFF mask. */
++		st,active-scan-mask = /bits/ 8 <0x01>;
++
++		status = "okay";
++	};
++};
++
++&slpi_pas {
++	/* Leave SLPI disabled until a mainline-side sensor consumer exists. */
++	status = "disabled";
++};
++
++&sound {
++	compatible = "qcom,sdm845-sndcard";
++	pinctrl-0 = <&quat_mi2s_active &quat_mi2s_sd0_active>;
++	pinctrl-names = "default";
++	model = "Xiaomi Mi 8";
++	status = "okay";
++
++	audio-routing =
++		"RX_BIAS", "MCLK",
++		"AMIC1", "MCLK",
++		"AMIC2", "MCLK",
++		"AMIC3", "MCLK",
++		"AMIC4", "MCLK",
++		"AMIC5", "MCLK",
++		"AMIC1", "MIC BIAS4",
++		"AMIC2", "MIC BIAS2",
++		"AMIC3", "MIC BIAS1",
++		"AMIC4", "MIC BIAS2",
++		"AMIC5", "MIC BIAS4",
++		"Left Spk", "Speaker Amp OUT";
++
++	mm1-dai-link {
++		link-name = "MultiMedia1";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++		};
++	};
++
++	mm2-dai-link {
++		link-name = "MultiMedia2";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++		};
++	};
++
++	mm3-dai-link {
++		link-name = "MultiMedia3";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++		};
++	};
++
++	mm4-dai-link {
++		link-name = "MultiMedia4";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
++		};
++	};
++
++	voicemmode1-dai-link {
++		link-name = "VoiceMMode1";
++		cpu {
++			sound-dai = <&q6voicedai VOICEMMODE1>;
++		};
++	};
++
++	speaker-dai-link {
++		link-name = "Speaker Playback";
++		cpu {
++			sound-dai = <&q6afedai QUATERNARY_MI2S_RX>;
++		};
++
++		platform {
++			sound-dai = <&q6routing>;
++		};
++
++		codec {
++			sound-dai = <&tas2557>;
++		};
++	};
++
++	slim-dai-link {
++		link-name = "SLIM Playback";
++		cpu {
++			sound-dai = <&q6afedai SLIMBUS_0_RX>;
++		};
++
++		platform {
++			sound-dai = <&q6routing>;
++		};
++
++		codec {
++			sound-dai = <&wcd9340 0>;
++		};
++	};
++
++	slimcap-dai-link {
++		link-name = "SLIM Capture";
++		cpu {
++			sound-dai = <&q6afedai SLIMBUS_0_TX>;
++		};
++
++		platform {
++			sound-dai = <&q6routing>;
++		};
++
++		codec {
++			sound-dai = <&wcd9340 1>;
++		};
++	};
++};
++
++&uart9 {
++	status = "okay";
++};
++
++&tlmm {
++	cam_sensor_ir_active: cam-sensor-ir-active-state {
++		pins = "gpio25", "gpio44", "gpio22";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_sensor_mclk0_active: cam-sensor-mclk0-active-state {
++		pins = "gpio13";
++		function = "cam_mclk";
++		drive-strength = <4>;
++		bias-disable;
++	};
++
++	cam_sensor_mclk1_active: cam-sensor-mclk1-active-state {
++		pins = "gpio14";
++		function = "cam_mclk";
++		drive-strength = <4>;
++		bias-disable;
++	};
++
++	cam_sensor_rear_active: cam-sensor-rear-active-state {
++		/*
++		 * Rear IMX363 TLMM pins: reset (119), camera_vdig_ldo enable
++		 * (99), and the two cam_rear_avddN enables (12, 40). PMI8998
++		 * GPIO 11 (rear dvdd enable) is configured in &pm8998_gpios.
++		 */
++		pins = "gpio119", "gpio99", "gpio12", "gpio40";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	ts_active: ts-active-state {
++		pins = "gpio31", "gpio32";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-pull-up;
++	};
++
++	ts_int_suspend: ts-int-suspend-state {
++		pins = "gpio31";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	ts_reset_suspend: ts-reset-suspend-state {
++		pins = "gpio32";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++};
++
++&ufs_mem_hc {
++	status = "okay";
++
++	reset-gpios = <&tlmm 150 GPIO_ACTIVE_LOW>;
++
++	vcc-supply = <&vreg_l20a_2p95>;
++	vcc-max-microamp = <600000>;
++	vccq2-supply = <&vreg_s4a_1p8>;
++	vccq2-max-microamp = <600000>;
++
++	qcom,vddp-ref-clk-supply = <&vreg_l2a_1p2>;
++	qcom,vddp-ref-clk-max-microamp = <100>;
++};
++
++&ufs_mem_phy {
++	status = "okay";
++
++	vdda-phy-supply = <&vreg_l1a_0p875>;
++	vdda-pll-supply = <&vreg_l26a_1p2>;
++};
++
++&usb_1 {
++	status = "okay";
++	qcom,select-utmi-as-pipe-clk;
++};
++
++&usb_1_dwc3 {
++	dr_mode = "otg";
++	maximum-speed = "high-speed";
++	phys = <&usb_1_hsphy>;
++	phy-names = "usb2-phy";
++	usb-role-switch;
++};
++
++&usb_1_dwc3_hs {
++	remote-endpoint = <&pmi8998_hs_in>;
++};
++
++&usb_1_hsphy {
++	status = "okay";
++
++	vdd-supply = <&vreg_l1a_0p875>;
++	vdda-pll-supply = <&vreg_l12a_1p8>;
++	vdda-phy-dpdm-supply = <&vreg_l24a_3p075>;
++
++	qcom,imp-res-offset-value = <8>;
++	qcom,hstx-trim-value = <QUSB2_V2_HSTX_TRIM_21_6_MA>;
++	qcom,preemphasis-level = <QUSB2_V2_PREEMPHASIS_5_PERCENT>;
++	qcom,preemphasis-width = <QUSB2_V2_PREEMPHASIS_WIDTH_HALF_BIT>;
++};
++
++&usb_1_qmpphy {
++	status = "disabled";
++};
++
++&usb_2 {
++	status = "disabled";
++};
++
++&uart6 {
++	status = "okay";
++
++	pinctrl-0 = <&qup_uart6_4pin>;
++
++	bluetooth {
++		compatible = "qcom,wcn3990-bt";
++
++		vddio-supply = <&vreg_s4a_1p8>;
++		vddxo-supply = <&vreg_l7a_1p8>;
++		vddrf-supply = <&vreg_l17a_1p3>;
++		vddch0-supply = <&vreg_l25a_3p3>;
++		max-speed = <3200000>;
++	};
++};
++
++&venus {
++	status = "disabled";
++};
++
++&wcd9340 {
++	reset-gpios = <&tlmm 64 GPIO_ACTIVE_HIGH>;
++	vdd-buck-supply = <&vreg_s4a_1p8>;
++	vdd-buck-sido-supply = <&vreg_s4a_1p8>;
++	vdd-tx-supply = <&vreg_s4a_1p8>;
++	vdd-rx-supply = <&vreg_s4a_1p8>;
++	vdd-io-supply = <&vreg_s4a_1p8>;
++	qcom,micbias1-microvolt = <2700000>;
++	qcom,micbias2-microvolt = <1800000>;
++	qcom,micbias3-microvolt = <2700000>;
++	qcom,micbias4-microvolt = <2700000>;
++};
++
++&wifi {
++	status = "okay";
++
++	vdd-0.8-cx-mx-supply = <&vreg_l5a_0p8>;
++	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
++	vdd-1.3-rfa-supply = <&vreg_l17a_1p3>;
++	vdd-3.3-ch0-supply = <&vreg_l25a_3p3>;
++	vdd-3.3-ch1-supply = <&vreg_l23a_3p3>;
++
++	qcom,snoc-host-cap-skip-quirk;
++	qcom,ath10k-calibration-variant = "xiaomi_dipper";
++	local-mac-address = [d8 ce 3a 8e e7 85];
++};
++
++&qup_uart9_default {
++	pinconf-tx {
++		pins = "gpio4";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	pinconf-rx {
++		pins = "gpio5";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};
++
++&tlmm {
++	gpio-reserved-ranges = <0 4>, <81 4>;
++};
+-- 
+2.44.0
+

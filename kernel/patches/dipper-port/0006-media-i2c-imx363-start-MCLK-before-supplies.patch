@@ -1,0 +1,86 @@
+From c1a0c3a3d8bb3a382100c6fd43293ac930bc54c6 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:20:07 +0500
+Subject: [PATCH 6/9] media: i2c: imx363: start MCLK before supplies
+
+Sony IMX-series datasheets require EXTCLK to be stable before reset
+is deasserted. The current power-on sequence in imx363_power_on()
+enables the bulk supplies and deasserts reset before enabling the
+clock, which violates that requirement.
+
+On most boards this happens to work because their pinctrl/clock
+controllers bring MCLK up early. On the Xiaomi Mi 8 (sdm845, dipper)
+with the Semco IMX363 module, however, mainline cam_cc_mclk0_clk
+stays gated until the sensor driver calls clk_prepare_enable(), and
+in that state the sensor never ACKs its own i2c address (read of
+chip-id register returns -ENXIO from the CCI controller). EEPROM at
+0x50 and actuator at 0x0e on the same bus respond normally, so this
+is specifically the sensor failing to come up.
+
+Reorder imx363_power_on() to start MCLK first, then ramp supplies,
+then deassert reset, matching what the vendor sensor blob actually
+encodes (MCLK -> VANA -> CUSTOM_GPIO1 -> VIO -> VDIG ->
+RESET-deassert). Use fsleep() delays that stay safely within Sony's
+"EXTCLK stable before reset deassertion" window. Also clean up on clk
+error path.
+
+The bulk-regulator ordering inside regulator_bulk_enable() is left
+to the regulator core; only the relative ordering of MCLK vs
+supplies vs reset is changed.
+
+Sibling drivers built from the same template (imx258, imx355) likely
+need the same fix; treated separately.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ drivers/media/i2c/imx363.c | 23 +++++++++++++++--------
+ 1 file changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/media/i2c/imx363.c b/drivers/media/i2c/imx363.c
+index ff8d25dae..6b53d09a5 100644
+--- a/drivers/media/i2c/imx363.c
++++ b/drivers/media/i2c/imx363.c
+@@ -1039,25 +1039,32 @@ static int imx363_power_on(struct device *dev)
+ 	struct imx363 *imx363 = to_imx363(sd);
+ 	int ret;
+ 
++	/*
++	 * Sony EXTCLK must be stable before reset deassertion. Start
++	 * MCLK first, then bring up supplies, then deassert reset.
++	 */
++	ret = clk_prepare_enable(imx363->clk);
++	if (ret) {
++		dev_err(dev, "failed to enable clock\n");
++		return ret;
++	}
++
++	fsleep(1000);
++
+ 	ret = regulator_bulk_enable(IMX363_NUM_SUPPLIES,
+ 				    imx363->supplies);
+ 	if (ret) {
+ 		dev_err(dev, "%s: failed to enable regulators\n",
+ 			__func__);
++		clk_disable_unprepare(imx363->clk);
+ 		return ret;
+ 	}
+ 
+-	usleep_range(400, 600);
++	fsleep(10000);
+ 
+ 	gpiod_set_value_cansleep(imx363->reset_gpio, 1);
+ 
+-	ret = clk_prepare_enable(imx363->clk);
+-	if (ret) {
+-		dev_err(dev, "failed to enable clock\n");
+-		regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
+-	}
+-
+-	usleep_range(1000, 1200);
++	fsleep(20000);
+ 
+ 	return 0;
+ }
+-- 
+2.44.0
+

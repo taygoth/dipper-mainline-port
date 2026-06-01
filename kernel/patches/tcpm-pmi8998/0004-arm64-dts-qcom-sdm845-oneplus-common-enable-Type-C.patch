@@ -1,0 +1,134 @@
+From 09f409e51566e9660178ec75c89ffe394f09e2ba Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:27:19 +0500
+Subject: [PATCH 4/4] arm64: dts: qcom: sdm845-oneplus-common: enable Type-C
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Enable the PMI8998 Type-C controller and VBUS regulator on the
+OnePlus 6 and 6T (enchilada / fajita).
+
+The usb-c-connector subnode advertises dual power and data roles,
+prefers sink, advertises a single 5V/1.5A source PDO and a single
+5V/3A sink PDO with the PDO_FIXED_DUAL_ROLE / PDO_FIXED_USB_COMM /
+PDO_FIXED_DATA_SWAP flags. op-sink-microwatt is 15W.
+
+sink-vdos / sink-vdos-v1 advertise PD3.0 identity using the Linux
+Foundation USB-IF VID 0x1d6b. Without this, real PD partners
+(Mac USB-C ports, multi-port docks) send VDM Discover_Identity
+right after SNK_READY, time out waiting for ACK (tReceiveResponse
+~24 ms), and start a SOFT_RESET loop at ~80 ms cadence. With the
+VDOs in place the partner ACKs cleanly and SNK_READY holds.
+
+dwc3 switches to dr_mode=otg with usb-role-switch wired to the
+PMI8998 connector subnode through the usb_1_dwc3_hs / pmi8998_hs_in
+endpoint pair. Maximum-speed remains "high-speed" — the SS PHY on
+these boards is intentionally left disabled.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ .../boot/dts/qcom/sdm845-oneplus-common.dtsi  | 73 ++++++++++++++++++-
+ 1 file changed, 69 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
+index 531407fc7..96a897f3c 100644
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
+@@ -16,6 +16,7 @@
+ #include <dt-bindings/sound/qcom,q6asm.h>
+ #include <dt-bindings/sound/qcom,q6voice.h>
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/usb/pd.h>
+ 
+ #include "sdm845.dtsi"
+ #include "sdm845-wcd9340.dtsi"
+@@ -1148,10 +1149,7 @@ &usb_1 {
+ };
+ 
+ &usb_1_dwc3 {
+-	/*
+-	 * We don't have the capability to switch modes yet.
+-	 */
+-	dr_mode = "peripheral";
++	dr_mode = "otg";
+ 
+ 	/* fastest mode for USB 2 */
+ 	maximum-speed = "high-speed";
+@@ -1159,6 +1157,73 @@ &usb_1_dwc3 {
+ 	/* Remove USB3 phy as it's unused on this device. */
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";
++	usb-role-switch;
++};
++
++&usb_1_dwc3_hs {
++	remote-endpoint = <&pmi8998_hs_in>;
++};
++
++&pmi8998_typec {
++	status = "okay";
++
++	vdd-pdphy-supply = <&vreg_s4a_1p8>;
++
++	connector {
++		compatible = "usb-c-connector";
++		label = "USB-C";
++		power-role = "dual";
++		data-role = "dual";
++		try-power-role = "sink";
++
++		op-sink-microwatt = <15000000>;
++
++		source-pdos = <PDO_FIXED(5000, 1500,
++					 PDO_FIXED_DUAL_ROLE |
++					 PDO_FIXED_USB_COMM |
++					 PDO_FIXED_DATA_SWAP)>;
++
++		sink-pdos = <PDO_FIXED(5000, 3000,
++				       PDO_FIXED_DUAL_ROLE |
++				       PDO_FIXED_USB_COMM |
++				       PDO_FIXED_DATA_SWAP)>;
++
++		/*
++		 * PD3.0 Discover Identity response used by partners
++		 * that request identity after SNK_READY.
++		 */
++		sink-vdos-v1 = <
++			VDO_IDH(0, 1, IDH_PTYPE_PERIPH, 0, 0, 0, 0x1d6b)
++			VDO_CERT(0)
++			VDO_PRODUCT(0xff45, 0x0100)
++		>;
++		sink-vdos = <
++			VDO_IDH(0, 1, IDH_PTYPE_PERIPH, 0,
++				IDH_PTYPE_NOT_DFP, 0, 0x1d6b)
++			VDO_CERT(0)
++			VDO_PRODUCT(0xff45, 0x0100)
++			VDO_UFP(UFP_VDO_VER1_2, DEV_USB2_CAPABLE,
++				UFP_RECEPTACLE, 0, 0, 0, 0, 0)
++		>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++				pmi8998_hs_in: endpoint {
++					remote-endpoint = <&usb_1_dwc3_hs>;
++				};
++			};
++		};
++	};
++};
++
++&pmi8998_vbus {
++	regulator-min-microamp = <500000>;
++	regulator-max-microamp = <1500000>;
++	status = "okay";
+ };
+ 
+ &usb_1_hsphy {
+-- 
+2.44.0
+

@@ -1,0 +1,1313 @@
+From 1710cc300fd4f4e41f01ae6c2c7948fdfbfca012 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Fri, 29 May 2026 11:37:31 +0500
+Subject: [PATCH 7/9] ASoC: codecs: add TAS2557 smart amplifier driver
+
+Add a minimal Texas Instruments TAS2557 ASoC codec driver used by Xiaomi
+Mi 8 speaker output.
+
+The driver follows the legacy TI Android TAS2557 firmware format used by
+the available tas2557_uCDSP.bin and tas2557_cal.bin files. Keep it
+self-contained instead of depending on the newer TAS2781 tasdevice
+firmware library, whose RCA/coef split and header layout do not match
+these blobs.
+
+This is primarily a Mobian/local port patch. It supports the validated
+ASI1 playback path, firmware/config loading, calibration blob loading,
+and runtime mute/unmute sequence needed for dipper bring-up.
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ sound/soc/codecs/Kconfig   |   10 +
+ sound/soc/codecs/Makefile  |    2 +
+ sound/soc/codecs/tas2557.c | 1230 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1242 insertions(+)
+ create mode 100644 sound/soc/codecs/tas2557.c
+
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index 9f9c77cb8..ece4f44be 100644
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -249,6 +249,7 @@ config SND_SOC_ALL_CODECS
+ 	imply SND_SOC_STA529
+ 	imply SND_SOC_STAC9766
+ 	imply SND_SOC_STI_SAS
++	imply SND_SOC_TAS2557
+ 	imply SND_SOC_TAS2552
+ 	imply SND_SOC_TAS2562
+ 	imply SND_SOC_TAS2764
+@@ -1913,6 +1914,15 @@ config SND_SOC_TAS2552
+ 	tristate "Texas Instruments TAS2552 Mono Audio amplifier"
+ 	depends on I2C
+ 
++config SND_SOC_TAS2557
++	tristate "Texas Instruments TAS2557 smart amplifier"
++	depends on I2C
++	help
++	  Enable support for Texas Instruments TAS2557 smart amplifiers.
++	  The driver supports I2C control, the ASI1 playback DAI, and the
++	  legacy TAS2557 firmware/configuration blobs used by some mobile
++	  devices.
++
+ config SND_SOC_TAS2562
+ 	tristate "Texas Instruments TAS2562 Mono Audio amplifier"
+ 	depends on I2C
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index a954ffa8a..0dc822729 100644
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -404,6 +404,7 @@ snd-soc-max98504-y := max98504.o
+ snd-soc-simple-amplifier-y := simple-amplifier.o
+ snd-soc-tpa6130a2-y := tpa6130a2.o
+ snd-soc-tas2552-y := tas2552.o
++snd-soc-tas2557-y := tas2557.o
+ snd-soc-tas2562-y := tas2562.o
+ snd-soc-tas2764-y := tas2764.o
+ snd-soc-tas2780-y := tas2780.o
+@@ -698,6 +699,7 @@ obj-$(CONFIG_SND_SOC_STA529)   += snd-soc-sta529.o
+ obj-$(CONFIG_SND_SOC_STAC9766)	+= snd-soc-stac9766.o
+ obj-$(CONFIG_SND_SOC_STI_SAS)	+= snd-soc-sti-sas.o
+ obj-$(CONFIG_SND_SOC_TAS2552)	+= snd-soc-tas2552.o
++obj-$(CONFIG_SND_SOC_TAS2557)	+= snd-soc-tas2557.o
+ obj-$(CONFIG_SND_SOC_TAS2562)	+= snd-soc-tas2562.o
+ obj-$(CONFIG_SND_SOC_TAS2764)	+= snd-soc-tas2764.o
+ obj-$(CONFIG_SND_SOC_TAS2780)	+= snd-soc-tas2780.o
+diff --git a/sound/soc/codecs/tas2557.c b/sound/soc/codecs/tas2557.c
+new file mode 100644
+index 000000000..f7c85e5d3
+--- /dev/null
++++ b/sound/soc/codecs/tas2557.c
+@@ -0,0 +1,1230 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Minimal ASoC driver for Texas Instruments TAS2557.
++ *
++ * Based on register names and bring-up sequences from the TI Android TAS2557
++ * GPLv2 driver. This port is intentionally conservative and supports the
++ * validated ASI1 playback path, legacy TAS2557 firmware loading, calibration
++ * blob loading, and runtime mute/unmute sequence needed by devices using
++ * the legacy TAS2557 firmware format.
++ */
++
++#include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/gpio.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_gpio.h>
++#include <linux/regmap.h>
++
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/soc-dapm.h>
++#include <linux/unaligned.h>
++
++#define TAS2557_REG(book, page, reg) \
++	((((unsigned int)(book) * 256 * 128) + ((unsigned int)(page) * 128)) + (reg))
++#define TAS2557_BOOK_ID(reg)		((unsigned int)(reg) / (256 * 128))
++#define TAS2557_PAGE_ID(reg)		(((unsigned int)(reg) % (256 * 128)) / 128)
++#define TAS2557_PAGE_REG(reg)		(((unsigned int)(reg) % (256 * 128)) % 128)
++
++#define TAS2557_PAGECTL_REG		0x00
++#define TAS2557_BOOKCTL_REG		0x7f
++
++#define TAS2557_SW_RESET_REG		TAS2557_REG(0, 0, 1)
++#define TAS2557_REV_PGID_REG		TAS2557_REG(0, 0, 3)
++#define TAS2557_POWER_CTRL1_REG		TAS2557_REG(0, 0, 4)
++#define TAS2557_POWER_CTRL2_REG		TAS2557_REG(0, 0, 5)
++#define TAS2557_SPK_CTRL_REG		TAS2557_REG(0, 0, 6)
++#define TAS2557_MUTE_REG		TAS2557_REG(0, 0, 7)
++#define TAS2557_SAR_ADC2_REG		TAS2557_REG(0, 0, 21)
++#define TAS2557_CLK_ERR_CTRL		TAS2557_REG(0, 0, 44)
++#define TAS2557_CLK_ERR_CTRL2		TAS2557_REG(0, 0, 45)
++#define TAS2557_CLK_ERR_CTRL3		TAS2557_REG(0, 0, 46)
++#define TAS2557_SAFE_GUARD_REG		TAS2557_REG(0, 0, 37)
++#define TAS2557_ASI1_DAC_FORMAT_REG	TAS2557_REG(0, 1, 1)
++#define TAS2557_GPIO1_PIN_REG		TAS2557_REG(0, 1, 61)
++#define TAS2557_GPIO2_PIN_REG		TAS2557_REG(0, 1, 62)
++#define TAS2557_GPI_PIN_REG		TAS2557_REG(0, 1, 77)
++#define TAS2557_SOFT_MUTE_REG		TAS2557_REG(100, 0, 7)
++
++#define TAS2557_PG_VERSION_1P0		0x80
++#define TAS2557_PG_VERSION_2P0		0x90
++#define TAS2557_PG_VERSION_2P1		0xa0
++
++#define TAS2557_FORMATS \
++	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
++
++#define TAS2557_FW_NAME		"tas2557_uCDSP.bin"
++#define TAS2557_CAL_FW_NAME	"ti/tas2557/tas2557_cal.bin"
++
++#define TAS2557_PPC_DRIVER_CRCCHK	0x00000200
++#define TAS2557_PPC_DRIVER_CONFDEV	0x00000300
++#define TAS2557_PPC_DRIVER_MTPLLSRC	0x00000400
++#define TAS2557_PPC_DRIVER_CFGDEV_NONCRC	0x00000101
++
++#define TAS2557_UDELAY			0xfffffffe
++#define TAS2557_BLOCK_PLL		0x00
++#define TAS2557_BLOCK_PGM_DEV_A		0x01
++#define TAS2557_BLOCK_CFG_COEFF_DEV_A	0x03
++#define TAS2557_BLOCK_CFG_PRE_DEV_A	0x04
++#define TAS2557_SAFE_GUARD_PATTERN	0x5a
++
++struct tas2557_fw_block {
++	unsigned int type;
++	bool pchksum_present;
++	u8 pchksum;
++	bool ychksum_present;
++	u8 ychksum;
++	unsigned int commands;
++	u8 *data;
++};
++
++struct tas2557_fw_data {
++	char name[64];
++	char *description;
++	unsigned int blocks;
++	struct tas2557_fw_block *block;
++};
++
++struct tas2557_fw_program {
++	char name[64];
++	char *description;
++	u8 app_mode;
++	u16 boost;
++	struct tas2557_fw_data data;
++};
++
++struct tas2557_fw_pll {
++	char name[64];
++	char *description;
++	struct tas2557_fw_block block;
++};
++
++struct tas2557_fw_config {
++	char name[64];
++	char *description;
++	unsigned int devices;
++	unsigned int program;
++	unsigned int pll;
++	unsigned int sampling_rate;
++	u8 pll_src;
++	unsigned int pll_src_rate;
++	struct tas2557_fw_data data;
++};
++
++struct tas2557_fw_calibration {
++	char name[64];
++	char *description;
++	unsigned int program;
++	unsigned int config;
++	struct tas2557_fw_data data;
++};
++
++struct tas2557_fw {
++	unsigned int size;
++	unsigned int checksum;
++	unsigned int ppc_version;
++	unsigned int fw_version;
++	unsigned int driver_version;
++	unsigned int timestamp;
++	char ddc_name[64];
++	char *description;
++	unsigned int device_family;
++	unsigned int device;
++	unsigned int plls;
++	struct tas2557_fw_pll *pll;
++	unsigned int programs;
++	struct tas2557_fw_program *program;
++	unsigned int configs;
++	struct tas2557_fw_config *config;
++	unsigned int calibrations;
++	struct tas2557_fw_calibration *calibration;
++};
++
++struct tas2557 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct gpio_desc *reset_gpiod;
++	struct gpio_desc *irq_gpiod;
++	struct mutex io_lock;
++	struct mutex state_lock;
++	int current_book;
++	int current_page;
++	unsigned int pgid;
++	struct tas2557_fw fw;
++	struct tas2557_fw cal_fw;
++	bool fw_loaded;
++	bool cal_loaded;
++	bool powered;
++	unsigned int current_program;
++	unsigned int current_config;
++	unsigned int current_rate;
++};
++
++static const struct regmap_config tas2557_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0x7f,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int tas2557_select_book_page(struct tas2557 *tas2557,
++				    unsigned int book, unsigned int page)
++{
++	int ret;
++
++	if (tas2557->current_book != book) {
++		ret = regmap_write(tas2557->regmap, TAS2557_PAGECTL_REG, 0);
++		if (ret)
++			return ret;
++
++		ret = regmap_write(tas2557->regmap, TAS2557_BOOKCTL_REG, book);
++		if (ret)
++			return ret;
++
++		tas2557->current_book = book;
++		tas2557->current_page = 0;
++	}
++
++	if (tas2557->current_page != page) {
++		ret = regmap_write(tas2557->regmap, TAS2557_PAGECTL_REG, page);
++		if (ret)
++			return ret;
++
++		tas2557->current_page = page;
++	}
++
++	return 0;
++}
++
++static int tas2557_write(struct tas2557 *tas2557, unsigned int reg,
++			 unsigned int val)
++{
++	int ret;
++
++	mutex_lock(&tas2557->io_lock);
++	ret = tas2557_select_book_page(tas2557, TAS2557_BOOK_ID(reg),
++				       TAS2557_PAGE_ID(reg));
++	if (!ret)
++		ret = regmap_write(tas2557->regmap, TAS2557_PAGE_REG(reg), val);
++	mutex_unlock(&tas2557->io_lock);
++
++	return ret;
++}
++
++static int tas2557_read(struct tas2557 *tas2557, unsigned int reg,
++			unsigned int *val)
++{
++	int ret;
++
++	mutex_lock(&tas2557->io_lock);
++	ret = tas2557_select_book_page(tas2557, TAS2557_BOOK_ID(reg),
++				       TAS2557_PAGE_ID(reg));
++	if (!ret)
++		ret = regmap_read(tas2557->regmap, TAS2557_PAGE_REG(reg), val);
++	mutex_unlock(&tas2557->io_lock);
++
++	return ret;
++}
++
++static int tas2557_bulk_write(struct tas2557 *tas2557, unsigned int reg,
++			      const void *data, size_t len)
++{
++	int ret;
++
++	mutex_lock(&tas2557->io_lock);
++	ret = tas2557_select_book_page(tas2557, TAS2557_BOOK_ID(reg),
++				       TAS2557_PAGE_ID(reg));
++	if (!ret)
++		ret = regmap_bulk_write(tas2557->regmap, TAS2557_PAGE_REG(reg),
++					data, len);
++	mutex_unlock(&tas2557->io_lock);
++
++	return ret;
++}
++
++static int tas2557_update_bits(struct tas2557 *tas2557, unsigned int reg,
++			       unsigned int mask, unsigned int val)
++{
++	unsigned int old, new;
++	int ret;
++
++	ret = tas2557_read(tas2557, reg, &old);
++	if (ret)
++		return ret;
++
++	new = (old & ~mask) | (val & mask);
++	if (new == old)
++		return 0;
++
++	return tas2557_write(tas2557, reg, new);
++}
++
++static int tas2557_sequence_write(struct tas2557 *tas2557,
++				  const unsigned int *seq)
++{
++	unsigned int i = 0;
++	int ret;
++
++	for (;;) {
++		unsigned int reg = seq[i++];
++		unsigned int val = seq[i++];
++
++		if (reg == 0xffffffff)
++			return 0;
++
++		if (reg == TAS2557_UDELAY) {
++			usleep_range(val, val + 100);
++			continue;
++		}
++
++		ret = tas2557_write(tas2557, reg, val);
++		if (ret)
++			return ret;
++	}
++}
++
++static const unsigned int tas2557_default_data[] = {
++	TAS2557_SAR_ADC2_REG, 0x05,
++	TAS2557_CLK_ERR_CTRL2, 0x21,
++	TAS2557_CLK_ERR_CTRL3, 0x21,
++	TAS2557_SAFE_GUARD_REG, TAS2557_SAFE_GUARD_PATTERN,
++	0xffffffff, 0xffffffff,
++};
++
++static const unsigned int tas2557_startup_data[] = {
++	TAS2557_GPI_PIN_REG, 0x15,
++	TAS2557_GPIO1_PIN_REG, 0x01,
++	TAS2557_GPIO2_PIN_REG, 0x01,
++	TAS2557_POWER_CTRL2_REG, 0xa0,
++	TAS2557_POWER_CTRL2_REG, 0xa3,
++	TAS2557_POWER_CTRL1_REG, 0xf8,
++	TAS2557_UDELAY, 2000,
++	TAS2557_CLK_ERR_CTRL, 0x2b,
++	0xffffffff, 0xffffffff,
++};
++
++static const unsigned int tas2557_unmute_data[] = {
++	TAS2557_MUTE_REG, 0x00,
++	TAS2557_SOFT_MUTE_REG, 0x00,
++	0xffffffff, 0xffffffff,
++};
++
++static void tas2557_fw_data_free(struct tas2557_fw_data *data)
++{
++	unsigned int i;
++
++	if (!data)
++		return;
++
++	kfree(data->description);
++	data->description = NULL;
++
++	for (i = 0; i < data->blocks; i++)
++		kfree(data->block[i].data);
++
++	kfree(data->block);
++	data->block = NULL;
++	data->blocks = 0;
++}
++
++static void tas2557_fw_free(struct tas2557_fw *fw)
++{
++	unsigned int i;
++
++	if (!fw)
++		return;
++
++	kfree(fw->description);
++
++	for (i = 0; i < fw->plls; i++) {
++		kfree(fw->pll[i].description);
++		kfree(fw->pll[i].block.data);
++	}
++	kfree(fw->pll);
++
++	for (i = 0; i < fw->programs; i++) {
++		kfree(fw->program[i].description);
++		tas2557_fw_data_free(&fw->program[i].data);
++	}
++	kfree(fw->program);
++
++	for (i = 0; i < fw->configs; i++) {
++		kfree(fw->config[i].description);
++		tas2557_fw_data_free(&fw->config[i].data);
++	}
++	kfree(fw->config);
++
++	for (i = 0; i < fw->calibrations; i++) {
++		kfree(fw->calibration[i].description);
++		tas2557_fw_data_free(&fw->calibration[i].data);
++	}
++	kfree(fw->calibration);
++
++	memset(fw, 0, sizeof(*fw));
++}
++
++static int tas2557_fw_need(const u8 *buf, size_t len, size_t pos, size_t need)
++{
++	if (pos > len || need > len - pos)
++		return -EINVAL;
++
++	return 0;
++}
++
++static u32 tas2557_fw_u32(const u8 *buf, size_t *pos)
++{
++	u32 val = get_unaligned_be32(buf + *pos);
++
++	*pos += 4;
++	return val;
++}
++
++static u16 tas2557_fw_u16(const u8 *buf, size_t *pos)
++{
++	u16 val = get_unaligned_be16(buf + *pos);
++
++	*pos += 2;
++	return val;
++}
++
++static int tas2557_fw_string(const u8 *buf, size_t len, size_t *pos,
++			     char **out)
++{
++	const u8 *nul;
++	size_t n;
++
++	nul = memchr(buf + *pos, '\0', len - *pos);
++	if (!nul)
++		return -EINVAL;
++
++	n = nul - (buf + *pos);
++	*out = kmemdup_nul(buf + *pos, n, GFP_KERNEL);
++	if (!*out)
++		return -ENOMEM;
++
++	*pos += n + 1;
++	return 0;
++}
++
++static int tas2557_fw_parse_block(struct tas2557 *tas2557,
++				  struct tas2557_fw *fw,
++				  struct tas2557_fw_block *block,
++				  const u8 *buf, size_t len, size_t *pos)
++{
++	size_t data_len;
++
++	if (tas2557_fw_need(buf, len, *pos, 8))
++		return -EINVAL;
++
++	block->type = tas2557_fw_u32(buf, pos);
++	if (fw->driver_version >= TAS2557_PPC_DRIVER_CRCCHK) {
++		if (tas2557_fw_need(buf, len, *pos, 4))
++			return -EINVAL;
++		block->pchksum_present = buf[(*pos)++];
++		block->pchksum = buf[(*pos)++];
++		block->ychksum_present = buf[(*pos)++];
++		block->ychksum = buf[(*pos)++];
++	}
++
++	block->commands = tas2557_fw_u32(buf, pos);
++	data_len = block->commands * 4;
++	if (tas2557_fw_need(buf, len, *pos, data_len))
++		return -EINVAL;
++
++	block->data = kmemdup(buf + *pos, data_len, GFP_KERNEL);
++	if (!block->data)
++		return -ENOMEM;
++
++	*pos += data_len;
++
++	dev_dbg(tas2557->dev, "fw block type=0x%x commands=%u\n",
++		block->type, block->commands);
++	return 0;
++}
++
++static int tas2557_fw_parse_data(struct tas2557 *tas2557,
++				 struct tas2557_fw *fw,
++				 struct tas2557_fw_data *data,
++				 const u8 *buf, size_t len, size_t *pos)
++{
++	unsigned int i;
++	int ret;
++
++	if (tas2557_fw_need(buf, len, *pos, 66))
++		return -EINVAL;
++
++	memcpy(data->name, buf + *pos, sizeof(data->name));
++	data->name[sizeof(data->name) - 1] = '\0';
++	*pos += sizeof(data->name);
++
++	ret = tas2557_fw_string(buf, len, pos, &data->description);
++	if (ret)
++		return ret;
++
++	if (tas2557_fw_need(buf, len, *pos, 2))
++		return -EINVAL;
++
++	data->blocks = tas2557_fw_u16(buf, pos);
++	data->block = kcalloc(data->blocks, sizeof(*data->block), GFP_KERNEL);
++	if (!data->block)
++		return data->blocks ? -ENOMEM : 0;
++
++	for (i = 0; i < data->blocks; i++) {
++		ret = tas2557_fw_parse_block(tas2557, fw, &data->block[i],
++					     buf, len, pos);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int tas2557_fw_parse(struct tas2557 *tas2557, struct tas2557_fw *fw,
++			    const u8 *buf, size_t len)
++{
++	static const u8 magic[] = { 0x35, 0x35, 0x35, 0x32 };
++	size_t pos = 0;
++	unsigned int i;
++	int ret;
++
++	tas2557_fw_free(fw);
++
++	if (tas2557_fw_need(buf, len, pos, 104) || memcmp(buf, magic, 4))
++		return -EINVAL;
++
++	pos += 4;
++	fw->size = tas2557_fw_u32(buf, &pos);
++	fw->checksum = tas2557_fw_u32(buf, &pos);
++	fw->ppc_version = tas2557_fw_u32(buf, &pos);
++	fw->fw_version = tas2557_fw_u32(buf, &pos);
++	fw->driver_version = tas2557_fw_u32(buf, &pos);
++	fw->timestamp = tas2557_fw_u32(buf, &pos);
++
++	memcpy(fw->ddc_name, buf + pos, sizeof(fw->ddc_name));
++	fw->ddc_name[sizeof(fw->ddc_name) - 1] = '\0';
++	pos += sizeof(fw->ddc_name);
++
++	ret = tas2557_fw_string(buf, len, &pos, &fw->description);
++	if (ret)
++		return ret;
++
++	if (tas2557_fw_need(buf, len, pos, 10))
++		return -EINVAL;
++
++	fw->device_family = tas2557_fw_u32(buf, &pos);
++	fw->device = tas2557_fw_u32(buf, &pos);
++	if (fw->device_family != 0 || fw->device != 2)
++		return dev_err_probe(tas2557->dev, -EINVAL,
++				     "unsupported fw family=%u device=%u\n",
++				     fw->device_family, fw->device);
++
++	fw->plls = tas2557_fw_u16(buf, &pos);
++	fw->pll = kcalloc(fw->plls, sizeof(*fw->pll), GFP_KERNEL);
++	if (!fw->pll)
++		return fw->plls ? -ENOMEM : 0;
++
++	for (i = 0; i < fw->plls; i++) {
++		if (tas2557_fw_need(buf, len, pos, 64))
++			return -EINVAL;
++		memcpy(fw->pll[i].name, buf + pos, sizeof(fw->pll[i].name));
++		fw->pll[i].name[sizeof(fw->pll[i].name) - 1] = '\0';
++		pos += sizeof(fw->pll[i].name);
++		ret = tas2557_fw_string(buf, len, &pos, &fw->pll[i].description);
++		if (ret)
++			return ret;
++		ret = tas2557_fw_parse_block(tas2557, fw, &fw->pll[i].block,
++					     buf, len, &pos);
++		if (ret)
++			return ret;
++	}
++
++	if (tas2557_fw_need(buf, len, pos, 2))
++		return -EINVAL;
++	fw->programs = tas2557_fw_u16(buf, &pos);
++	fw->program = kcalloc(fw->programs, sizeof(*fw->program), GFP_KERNEL);
++	if (!fw->program)
++		return fw->programs ? -ENOMEM : 0;
++
++	for (i = 0; i < fw->programs; i++) {
++		if (tas2557_fw_need(buf, len, pos, 67))
++			return -EINVAL;
++		memcpy(fw->program[i].name, buf + pos, sizeof(fw->program[i].name));
++		fw->program[i].name[sizeof(fw->program[i].name) - 1] = '\0';
++		pos += sizeof(fw->program[i].name);
++		ret = tas2557_fw_string(buf, len, &pos,
++					&fw->program[i].description);
++		if (ret)
++			return ret;
++		fw->program[i].app_mode = buf[pos++];
++		fw->program[i].boost = tas2557_fw_u16(buf, &pos);
++		ret = tas2557_fw_parse_data(tas2557, fw, &fw->program[i].data,
++					    buf, len, &pos);
++		if (ret)
++			return ret;
++	}
++
++	if (tas2557_fw_need(buf, len, pos, 2))
++		return -EINVAL;
++	fw->configs = tas2557_fw_u16(buf, &pos);
++	fw->config = kcalloc(fw->configs, sizeof(*fw->config), GFP_KERNEL);
++	if (!fw->config)
++		return fw->configs ? -ENOMEM : 0;
++
++	for (i = 0; i < fw->configs; i++) {
++		struct tas2557_fw_config *cfg = &fw->config[i];
++
++		if (tas2557_fw_need(buf, len, pos, 70))
++			return -EINVAL;
++		memcpy(cfg->name, buf + pos, sizeof(cfg->name));
++		cfg->name[sizeof(cfg->name) - 1] = '\0';
++		pos += sizeof(cfg->name);
++		ret = tas2557_fw_string(buf, len, &pos, &cfg->description);
++		if (ret)
++			return ret;
++		if (fw->driver_version >= TAS2557_PPC_DRIVER_CONFDEV ||
++		    (fw->driver_version >= TAS2557_PPC_DRIVER_CFGDEV_NONCRC &&
++		     fw->driver_version < TAS2557_PPC_DRIVER_CRCCHK))
++			cfg->devices = tas2557_fw_u16(buf, &pos);
++		else
++			cfg->devices = 1;
++		cfg->program = buf[pos++];
++		cfg->pll = buf[pos++];
++		cfg->sampling_rate = tas2557_fw_u32(buf, &pos);
++		if (fw->driver_version >= TAS2557_PPC_DRIVER_MTPLLSRC) {
++			cfg->pll_src = buf[pos++];
++			cfg->pll_src_rate = tas2557_fw_u32(buf, &pos);
++		}
++		ret = tas2557_fw_parse_data(tas2557, fw, &cfg->data,
++					    buf, len, &pos);
++		if (ret)
++			return ret;
++	}
++
++	if (pos >= len)
++		goto out;
++
++	if (tas2557_fw_need(buf, len, pos, 2))
++		return -EINVAL;
++	fw->calibrations = tas2557_fw_u16(buf, &pos);
++	fw->calibration = kcalloc(fw->calibrations, sizeof(*fw->calibration),
++				  GFP_KERNEL);
++	if (!fw->calibration)
++		return fw->calibrations ? -ENOMEM : 0;
++
++	for (i = 0; i < fw->calibrations; i++) {
++		struct tas2557_fw_calibration *cal = &fw->calibration[i];
++
++		if (tas2557_fw_need(buf, len, pos, 66))
++			return -EINVAL;
++		memcpy(cal->name, buf + pos, sizeof(cal->name));
++		cal->name[sizeof(cal->name) - 1] = '\0';
++		pos += sizeof(cal->name);
++		ret = tas2557_fw_string(buf, len, &pos, &cal->description);
++		if (ret)
++			return ret;
++		cal->program = buf[pos++];
++		cal->config = buf[pos++];
++		ret = tas2557_fw_parse_data(tas2557, fw, &cal->data,
++					    buf, len, &pos);
++		if (ret)
++			return ret;
++	}
++
++out:
++	dev_dbg(tas2557->dev,
++		"fw loaded ddc=%s programs=%u configs=%u calibrations=%u\n",
++		 fw->ddc_name, fw->programs, fw->configs, fw->calibrations);
++	return 0;
++}
++
++static void tas2557_hw_reset(struct tas2557 *tas2557)
++{
++	if (!tas2557->reset_gpiod)
++		return;
++
++	gpiod_set_value_cansleep(tas2557->reset_gpiod, 0);
++	usleep_range(5000, 6000);
++	gpiod_set_value_cansleep(tas2557->reset_gpiod, 1);
++	usleep_range(2000, 3000);
++
++	tas2557->current_book = -1;
++	tas2557->current_page = -1;
++}
++
++static int tas2557_shutdown(struct tas2557 *tas2557)
++{
++	int ret;
++
++	ret = tas2557_write(tas2557, TAS2557_CLK_ERR_CTRL, 0x00);
++	if (ret)
++		return ret;
++	ret = tas2557_write(tas2557, TAS2557_SOFT_MUTE_REG, 0x01);
++	if (ret)
++		return ret;
++	usleep_range(10000, 11000);
++	ret = tas2557_write(tas2557, TAS2557_MUTE_REG, 0x03);
++	if (ret)
++		return ret;
++	ret = tas2557_write(tas2557, TAS2557_POWER_CTRL1_REG, 0x60);
++	if (ret)
++		return ret;
++	usleep_range(2000, 3000);
++	ret = tas2557_write(tas2557, TAS2557_POWER_CTRL2_REG, 0x00);
++	if (ret)
++		return ret;
++	ret = tas2557_write(tas2557, TAS2557_POWER_CTRL1_REG, 0x00);
++	if (ret)
++		return ret;
++	ret = tas2557_write(tas2557, TAS2557_GPIO1_PIN_REG, 0x00);
++	if (ret)
++		return ret;
++	ret = tas2557_write(tas2557, TAS2557_GPIO2_PIN_REG, 0x00);
++	if (ret)
++		return ret;
++
++	return tas2557_write(tas2557, TAS2557_GPI_PIN_REG, 0x00);
++}
++
++static int tas2557_load_block(struct tas2557 *tas2557,
++			      const struct tas2557_fw_block *block)
++{
++	unsigned int command = 0;
++	int ret = 0;
++
++	dev_dbg(tas2557->dev, "load fw block type=0x%x commands=%u\n",
++		block->type, block->commands);
++
++	while (command < block->commands) {
++		const u8 *cmd = block->data + command * 4;
++		u8 book = cmd[0];
++		u8 page = cmd[1];
++		u8 offset = cmd[2];
++		u8 data = cmd[3];
++
++		command++;
++
++		if (offset <= 0x7f) {
++			ret = tas2557_write(tas2557,
++					    TAS2557_REG(book, page, offset),
++					    data);
++			if (ret)
++				return ret;
++		} else if (offset == 0x81) {
++			msleep((book << 8) + page);
++		} else if (offset == 0x85) {
++			unsigned int len = (book << 8) + page;
++			const u8 *bulk = block->data + command * 4;
++
++			if (command >= block->commands || len < 1)
++				return -EINVAL;
++
++			book = bulk[0];
++			page = bulk[1];
++			offset = bulk[2];
++
++			if (len == 1)
++				ret = tas2557_write(tas2557,
++						    TAS2557_REG(book, page, offset),
++						    bulk[3]);
++			else
++				ret = tas2557_bulk_write(tas2557,
++							 TAS2557_REG(book, page, offset),
++							 bulk + 3, len);
++			if (ret)
++				return ret;
++
++			command++;
++			if (len >= 2)
++				command += ((len - 2) / 4) + 1;
++			if (command > block->commands)
++				return -EINVAL;
++		} else {
++			dev_warn(tas2557->dev, "unsupported fw opcode offset=0x%x\n",
++				 offset);
++			return -EINVAL;
++		}
++	}
++
++	return 0;
++}
++
++static int tas2557_load_data_type(struct tas2557 *tas2557,
++				  const struct tas2557_fw_data *data,
++				  unsigned int type)
++{
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < data->blocks; i++) {
++		if (data->block[i].type != type)
++			continue;
++
++		ret = tas2557_load_block(tas2557, &data->block[i]);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int tas2557_find_config(struct tas2557 *tas2557, unsigned int rate)
++{
++	unsigned int i;
++
++	for (i = 0; i < tas2557->fw.configs; i++) {
++		const struct tas2557_fw_config *cfg = &tas2557->fw.config[i];
++
++		if (cfg->program == tas2557->current_program &&
++		    (!rate || cfg->sampling_rate == rate))
++			return i;
++	}
++
++	for (i = 0; i < tas2557->fw.configs; i++) {
++		const struct tas2557_fw_config *cfg = &tas2557->fw.config[i];
++
++		if (cfg->program == tas2557->current_program)
++			return i;
++	}
++
++	return -EINVAL;
++}
++
++static int tas2557_load_config(struct tas2557 *tas2557, unsigned int config)
++{
++	const struct tas2557_fw_config *cfg;
++	int ret;
++
++	if (config >= tas2557->fw.configs)
++		return -EINVAL;
++
++	cfg = &tas2557->fw.config[config];
++	if (cfg->pll >= tas2557->fw.plls)
++		return -EINVAL;
++
++	dev_dbg(tas2557->dev, "load config %u (%s), pll=%u rate=%u\n",
++		 config, cfg->name, cfg->pll, cfg->sampling_rate);
++
++	ret = tas2557_load_block(tas2557, &tas2557->fw.pll[cfg->pll].block);
++	if (ret)
++		return ret;
++
++	ret = tas2557_load_data_type(tas2557, &cfg->data,
++				     TAS2557_BLOCK_CFG_PRE_DEV_A);
++	if (ret)
++		return ret;
++
++	ret = tas2557_load_data_type(tas2557, &cfg->data,
++				     TAS2557_BLOCK_CFG_COEFF_DEV_A);
++	if (ret)
++		return ret;
++
++	if (tas2557->cal_loaded && tas2557->cal_fw.calibrations)
++		ret = tas2557_load_data_type(tas2557,
++					     &tas2557->cal_fw.calibration[0].data,
++					     TAS2557_BLOCK_CFG_COEFF_DEV_A);
++	if (ret)
++		return ret;
++
++	tas2557->current_config = config;
++	tas2557->current_rate = cfg->sampling_rate;
++
++	return 0;
++}
++
++static int tas2557_load_program(struct tas2557 *tas2557, unsigned int program,
++				unsigned int rate)
++{
++	const struct tas2557_fw_program *pgm;
++	int config;
++	int ret;
++
++	if (!tas2557->fw_loaded)
++		return -ENOENT;
++	if (program >= tas2557->fw.programs)
++		return -EINVAL;
++
++	pgm = &tas2557->fw.program[program];
++
++	tas2557_hw_reset(tas2557);
++	ret = tas2557_write(tas2557, TAS2557_SW_RESET_REG, 0x01);
++	if (ret)
++		return ret;
++	usleep_range(1000, 2000);
++
++	ret = tas2557_sequence_write(tas2557, tas2557_default_data);
++	if (ret)
++		return ret;
++
++	ret = tas2557_update_bits(tas2557, TAS2557_ASI1_DAC_FORMAT_REG,
++				  0x01, 0x01);
++	if (ret)
++		return ret;
++
++	dev_dbg(tas2557->dev, "load program %u (%s), app_mode=%u\n",
++		 program, pgm->name, pgm->app_mode);
++
++	ret = tas2557_load_data_type(tas2557, &pgm->data,
++				     TAS2557_BLOCK_PGM_DEV_A);
++	if (ret)
++		return ret;
++
++	tas2557->current_program = program;
++
++	config = tas2557_find_config(tas2557, rate);
++	if (config < 0)
++		return config;
++
++	return tas2557_load_config(tas2557, config);
++}
++
++static int tas2557_load_firmware(struct tas2557 *tas2557)
++{
++	const struct firmware *fw;
++	int ret;
++
++	ret = request_firmware(&fw, TAS2557_FW_NAME, tas2557->dev);
++	if (ret)
++		return dev_err_probe(tas2557->dev, ret,
++				     "failed to load %s\n", TAS2557_FW_NAME);
++
++	ret = tas2557_fw_parse(tas2557, &tas2557->fw, fw->data, fw->size);
++	release_firmware(fw);
++	if (ret)
++		return dev_err_probe(tas2557->dev, ret,
++				     "failed to parse %s\n", TAS2557_FW_NAME);
++
++	tas2557->fw_loaded = true;
++
++	ret = request_firmware(&fw, TAS2557_CAL_FW_NAME, tas2557->dev);
++	if (ret) {
++		dev_warn(tas2557->dev, "calibration firmware %s not found: %d\n",
++			 TAS2557_CAL_FW_NAME, ret);
++		return 0;
++	}
++
++	ret = tas2557_fw_parse(tas2557, &tas2557->cal_fw, fw->data, fw->size);
++	release_firmware(fw);
++	if (ret) {
++		dev_warn(tas2557->dev, "failed to parse calibration: %d\n", ret);
++		tas2557_fw_free(&tas2557->cal_fw);
++		return 0;
++	}
++
++	tas2557->cal_loaded = true;
++	return 0;
++}
++
++static int tas2557_power_on(struct tas2557 *tas2557)
++{
++	unsigned int val;
++	int ret;
++
++	if (!tas2557->fw_loaded)
++		return -ENOENT;
++
++	if (!tas2557->current_rate) {
++		/*
++		 * Default to 48 kHz until ALSA hw_params selects a specific
++		 * stream rate.
++		 */
++		ret = tas2557_load_program(tas2557, 0, 48000);
++		if (ret)
++			return ret;
++	}
++
++	ret = tas2557_read(tas2557, TAS2557_SAFE_GUARD_REG, &val);
++	if (ret)
++		return ret;
++	if ((val & 0xff) != TAS2557_SAFE_GUARD_PATTERN) {
++		dev_err(tas2557->dev, "safe guard mismatch: 0x%x\n", val & 0xff);
++		return -EPIPE;
++	}
++
++	ret = tas2557_sequence_write(tas2557, tas2557_startup_data);
++	if (ret)
++		return ret;
++
++	ret = tas2557_sequence_write(tas2557, tas2557_unmute_data);
++	if (ret)
++		return ret;
++
++	tas2557->powered = true;
++	dev_dbg(tas2557->dev, "speaker amplifier enabled\n");
++	return 0;
++}
++
++static int tas2557_power_off(struct tas2557 *tas2557)
++{
++	int ret;
++
++	ret = tas2557_shutdown(tas2557);
++	if (!ret)
++		tas2557->powered = false;
++
++	return ret;
++}
++
++static int tas2557_component_probe(struct snd_soc_component *component)
++{
++	struct tas2557 *tas2557 = snd_soc_component_get_drvdata(component);
++
++	dev_dbg(tas2557->dev, "component registered; firmware loader enabled\n");
++
++	return 0;
++}
++
++static const struct snd_soc_dapm_widget tas2557_dapm_widgets[] = {
++	SND_SOC_DAPM_AIF_IN("ASI1", "ASI1 Playback", 0, SND_SOC_NOPM, 0, 0),
++	SND_SOC_DAPM_DAC("DAC", NULL, SND_SOC_NOPM, 0, 0),
++	SND_SOC_DAPM_OUT_DRV("ClassD", SND_SOC_NOPM, 0, 0, NULL, 0),
++	SND_SOC_DAPM_OUTPUT("OUT"),
++};
++
++static const struct snd_soc_dapm_route tas2557_audio_map[] = {
++	{ "DAC", NULL, "ASI1" },
++	{ "ClassD", NULL, "DAC" },
++	{ "OUT", NULL, "ClassD" },
++};
++
++static const struct snd_soc_component_driver tas2557_component_driver = {
++	.probe = tas2557_component_probe,
++	.dapm_widgets = tas2557_dapm_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(tas2557_dapm_widgets),
++	.dapm_routes = tas2557_audio_map,
++	.num_dapm_routes = ARRAY_SIZE(tas2557_audio_map),
++};
++
++static int tas2557_hw_params(struct snd_pcm_substream *substream,
++			     struct snd_pcm_hw_params *params,
++			     struct snd_soc_dai *dai)
++{
++	struct tas2557 *tas2557 = snd_soc_component_get_drvdata(dai->component);
++	unsigned int width = params_width(params);
++	unsigned int width_sel;
++	unsigned int rate = params_rate(params);
++	int ret = 0;
++
++	dev_dbg(tas2557->dev, "hw_params rate=%u width=%u channels=%u\n",
++		rate, width, params_channels(params));
++
++	switch (width) {
++	case 16:
++		width_sel = 0x00;
++		break;
++	case 20:
++		width_sel = 0x08;
++		break;
++	case 24:
++		width_sel = 0x10;
++		break;
++	case 32:
++		width_sel = 0x18;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	mutex_lock(&tas2557->state_lock);
++	ret = tas2557_update_bits(tas2557, TAS2557_ASI1_DAC_FORMAT_REG,
++				  0x18, width_sel);
++	if (!ret && tas2557->fw_loaded &&
++	    (!tas2557->current_rate || tas2557->current_rate != rate))
++		ret = tas2557_load_program(tas2557, tas2557->current_program,
++					   rate);
++	mutex_unlock(&tas2557->state_lock);
++
++	return ret;
++}
++
++static int tas2557_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++	struct tas2557 *tas2557 = snd_soc_component_get_drvdata(dai->component);
++	int ret;
++
++	mutex_lock(&tas2557->state_lock);
++	if (mute)
++		ret = tas2557_power_off(tas2557);
++	else
++		ret = tas2557_power_on(tas2557);
++	if (ret) {
++		dev_err(tas2557->dev, "failed to %s amplifier: %d\n",
++			mute ? "mute" : "unmute", ret);
++		tas2557_shutdown(tas2557);
++		tas2557->powered = false;
++	}
++	mutex_unlock(&tas2557->state_lock);
++
++	return ret;
++}
++
++static const struct snd_soc_dai_ops tas2557_dai_ops = {
++	.hw_params = tas2557_hw_params,
++	.mute_stream = tas2557_mute_stream,
++};
++
++static struct snd_soc_dai_driver tas2557_dai_driver = {
++	.name = "tas2557 ASI1",
++	.playback = {
++		.stream_name = "ASI1 Playback",
++		.channels_min = 1,
++		.channels_max = 2,
++		.rates = SNDRV_PCM_RATE_8000_192000,
++		.formats = TAS2557_FORMATS,
++	},
++	.ops = &tas2557_dai_ops,
++	.symmetric_rate = 1,
++};
++
++static struct gpio_desc *tas2557_get_gpiod(struct device *dev,
++					   const char *con_id,
++					   const char *legacy_name,
++					   enum gpiod_flags flags)
++{
++	struct gpio_desc *desc;
++	int gpio;
++	int ret;
++
++	desc = devm_gpiod_get_optional(dev, con_id, flags);
++	if (!IS_ERR(desc) || PTR_ERR(desc) != -ENOENT)
++		return desc;
++
++	if (!dev->of_node)
++		return NULL;
++
++	gpio = of_get_named_gpio(dev->of_node, legacy_name, 0);
++	if (!gpio_is_valid(gpio))
++		return NULL;
++
++	ret = devm_gpio_request_one(dev, gpio,
++				    flags == GPIOD_IN ? GPIOF_IN : GPIOF_OUT_INIT_LOW,
++				    legacy_name);
++	if (ret)
++		return ERR_PTR(dev_err_probe(dev, ret, "failed to request %s\n",
++					     legacy_name));
++
++	return gpio_to_desc(gpio);
++}
++
++static int tas2557_i2c_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct tas2557 *tas2557;
++	unsigned int val;
++	int ret;
++	int i;
++
++	tas2557 = devm_kzalloc(dev, sizeof(*tas2557), GFP_KERNEL);
++	if (!tas2557)
++		return -ENOMEM;
++
++	tas2557->dev = dev;
++	tas2557->current_book = -1;
++	tas2557->current_page = -1;
++	mutex_init(&tas2557->io_lock);
++	mutex_init(&tas2557->state_lock);
++
++	i2c_set_clientdata(client, tas2557);
++
++	tas2557->regmap = devm_regmap_init_i2c(client, &tas2557_regmap_config);
++	if (IS_ERR(tas2557->regmap))
++		return dev_err_probe(dev, PTR_ERR(tas2557->regmap),
++				     "failed to allocate regmap\n");
++
++	tas2557->reset_gpiod = tas2557_get_gpiod(dev, "ti,cdc-reset",
++						 "ti,cdc-reset-gpio",
++						 GPIOD_OUT_LOW);
++	if (IS_ERR(tas2557->reset_gpiod))
++		return PTR_ERR(tas2557->reset_gpiod);
++
++	tas2557->irq_gpiod = tas2557_get_gpiod(dev, "ti,irq", "ti,irq-gpio",
++					       GPIOD_IN);
++	if (IS_ERR(tas2557->irq_gpiod))
++		return PTR_ERR(tas2557->irq_gpiod);
++
++	tas2557_hw_reset(tas2557);
++
++	ret = tas2557_write(tas2557, TAS2557_SW_RESET_REG, 0x01);
++	if (ret)
++		return dev_err_probe(dev, ret, "software reset failed\n");
++
++	usleep_range(1000, 2000);
++
++	ret = tas2557_read(tas2557, TAS2557_REV_PGID_REG, &val);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read PGID\n");
++
++	tas2557->pgid = val;
++	switch (val) {
++	case TAS2557_PG_VERSION_1P0:
++		dev_dbg(dev, "PG1.0 silicon found\n");
++		break;
++	case TAS2557_PG_VERSION_2P0:
++		dev_dbg(dev, "PG2.0 silicon found\n");
++		break;
++	case TAS2557_PG_VERSION_2P1:
++		dev_dbg(dev, "PG2.1 silicon found\n");
++		break;
++	default:
++		dev_warn(dev, "unknown PGID 0x%x\n", val);
++		break;
++	}
++
++	for (i = 0; i < 16; i++) {
++		ret = tas2557_read(tas2557, TAS2557_REG(0, 0, i), &val);
++		if (ret)
++			break;
++		dev_dbg(dev, "b0p0r%02x = 0x%02x\n", i, val & 0xff);
++	}
++
++	ret = tas2557_shutdown(tas2557);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to put device in shutdown\n");
++
++	ret = tas2557_load_firmware(tas2557);
++	if (ret) {
++		dev_warn(dev, "firmware unavailable; amplifier will stay muted: %d\n",
++			 ret);
++	} else {
++		ret = tas2557_load_program(tas2557, 0, 48000);
++		if (ret) {
++			dev_warn(dev, "failed to pre-load firmware program: %d\n",
++				 ret);
++			tas2557_shutdown(tas2557);
++		}
++	}
++
++	return devm_snd_soc_register_component(dev, &tas2557_component_driver,
++					       &tas2557_dai_driver, 1);
++}
++
++static const struct of_device_id tas2557_of_match[] = {
++	{ .compatible = "ti,tas2557" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tas2557_of_match);
++
++static const struct i2c_device_id tas2557_i2c_id[] = {
++	{ "tas2557" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, tas2557_i2c_id);
++
++static struct i2c_driver tas2557_i2c_driver = {
++	.driver = {
++		.name = "tas2557",
++		.of_match_table = tas2557_of_match,
++	},
++	.probe = tas2557_i2c_probe,
++	.id_table = tas2557_i2c_id,
++};
++module_i2c_driver(tas2557_i2c_driver);
++
++MODULE_DESCRIPTION("Texas Instruments TAS2557 ASoC smart amplifier driver");
++MODULE_AUTHOR("Max Furman <taygoth@gmail.com>");
++MODULE_LICENSE("GPL");
+-- 
+2.44.0
+

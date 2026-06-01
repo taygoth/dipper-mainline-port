@@ -1,0 +1,96 @@
+From e130f39298ff6bad11acc1e6df22d897331905c9 Mon Sep 17 00:00:00 2001
+From: Max Furman <taygoth@gmail.com>
+Date: Mon, 1 Jun 2026 00:20:07 +0500
+Subject: [PATCH 4/9] dt-bindings: display: panel: Add Samsung EA8074
+
+Add a binding for the Samsung EA8074 AMOLED DSI command-mode panel.
+The panel is found on the Xiaomi Mi 8 (dipper).
+
+Signed-off-by: Max Furman <taygoth@gmail.com>
+---
+ .../display/panel/samsung,ea8074.yaml         | 73 +++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/display/panel/samsung,ea8074.yaml
+
+diff --git a/Documentation/devicetree/bindings/display/panel/samsung,ea8074.yaml b/Documentation/devicetree/bindings/display/panel/samsung,ea8074.yaml
+new file mode 100644
+index 000000000..45c6bb382
+--- /dev/null
++++ b/Documentation/devicetree/bindings/display/panel/samsung,ea8074.yaml
+@@ -0,0 +1,73 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/display/panel/samsung,ea8074.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung EA8074 AMOLED DSI command-mode panel
++
++maintainers:
++  - Max Furman <taygoth@gmail.com>
++
++description: |
++  The Samsung EA8074 is a 1080x2248 AMOLED DSI command-mode panel
++  with a notch cutout. It runs on a 4-lane MIPI-DSI interface and
++  is used on the Xiaomi Mi 8.
++
++allOf:
++  - $ref: panel-common.yaml#
++
++properties:
++  compatible:
++    const: samsung,ea8074
++
++  reg:
++    maxItems: 1
++
++  vddio-supply:
++    description: I/O voltage supply
++  elvdd-supply:
++    description: EL driving positive voltage supply
++  elvss-supply:
++    description: EL driving negative voltage supply
++
++  reset-gpios: true
++  port: true
++
++required:
++  - compatible
++  - reg
++  - reset-gpios
++  - vddio-supply
++  - elvdd-supply
++  - elvss-supply
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    dsi {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        panel@0 {
++            compatible = "samsung,ea8074";
++            reg = <0>;
++
++            reset-gpios = <&tlmm 6 GPIO_ACTIVE_LOW>;
++
++            vddio-supply = <&vreg_l14a_1p8>;
++            elvdd-supply = <&lab>;
++            elvss-supply = <&ibb>;
++
++            port {
++                panel_in: endpoint {
++                    remote-endpoint = <&dsi0_out>;
++                };
++            };
++        };
++    };
++
++...
+-- 
+2.44.0
+
